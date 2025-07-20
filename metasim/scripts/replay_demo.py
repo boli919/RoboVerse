@@ -159,7 +159,7 @@ def replay_single_trajectory(env, scenario, traj_path, args):
     ## Main loop
     step = 0
     while True:
-        log.debug(f"Step {step}")
+        # log.debug(f"Step {step}")
         tic = time.time()
         if args.object_states:
             if all_states is None:

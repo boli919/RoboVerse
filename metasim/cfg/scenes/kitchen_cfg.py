@@ -10,7 +10,7 @@ class KitchenCfg(SceneCfg):
     """Config class for kitchen scene"""
 
     name: str = "kitchen"
-    usd_path: str = "roboverse_data/scenes/walk/Kitchen/Kitchen.obj"
+    usd_path: str = "models/scenes/Kitchen/Kitchen.obj"
     positions: list[tuple[float, float, float]] = [
         (0,-3,0),
     ]  # XXX: only positions are randomized for now

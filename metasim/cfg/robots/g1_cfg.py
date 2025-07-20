@@ -29,11 +29,11 @@ class G1Cfg(BaseRobotCfg):
     # HuggingFace via `metasim.utils.hf_util`.
     usd_path: str | None = "roboverse_data/robots/g1/usd/g1.usd"  # placeholder
     mjcf_path: str | None = "roboverse_data/robots/g1/mjcf/g1.xml"  # placeholder
-    urdf_path: str | None = "roboverse_data/robots/g1/urdf/g1.urdf"
+    urdf_path: str | None = "resources/robots/g1/g1.urdf"
 
     enabled_gravity: bool = True
     # Set to True for fixing the base link during debugging to prevent root body dynamics.
-    fix_base_link: bool = True
+    fix_base_link: bool = False
     enabled_self_collisions: bool = False
     isaacgym_flip_visual_attachments: bool = False
     collapse_fixed_joints: bool = True

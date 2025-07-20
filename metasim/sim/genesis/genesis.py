@@ -121,9 +121,52 @@ class GenesisHandler(BaseSimHandler):
                     gs.morphs.Sphere(radius=obj.radius), surface=gs.surfaces.Default(color=obj.color)
                 )
             elif isinstance(obj, (RigidObjCfg, ArticulationObjCfg)):
-                obj_inst = self.scene_inst.add_entity(
-                    gs.morphs.URDF(file=obj.urdf_path, fixed=obj.fix_base_link, scale=obj.scale),
-                )
+                # -------------------------------------------------------------
+                # Determine which asset path to use and load the object.
+                # Priority: URDF > mesh_path > usd_path > mjcf_path. This allows
+                # users to specify a variety of formats such as OBJ/STL/PLY via
+                # ``mesh_path``.
+                # -------------------------------------------------------------
+                asset_path: str | None = None
+                if getattr(obj, "urdf_path", None):
+                    asset_path = obj.urdf_path
+                elif getattr(obj, "mesh_path", None):
+                    asset_path = obj.mesh_path
+                elif getattr(obj, "usd_path", None):
+                    asset_path = obj.usd_path
+                elif getattr(obj, "mjcf_path", None):
+                    asset_path = obj.mjcf_path
+
+                if asset_path is None:
+                    log.warning(
+                        f"[Genesis] No valid asset path provided for object '{obj.name}'. Skipping this object.")
+                    continue
+
+                if not os.path.exists(asset_path):
+                    log.warning(
+                        f"[Genesis] Asset file for object '{obj.name}' not found at '{asset_path}'. Skipping this object.")
+                    continue
+
+                ext = os.path.splitext(asset_path)[1].lower()
+
+                try:
+                    if ext in {".urdf", ".xml", ".mjcf"}:
+                        # Load as articulated/rigid URDF or MJCF object.
+                        obj_inst = self.scene_inst.add_entity(
+                            gs.morphs.URDF(file=asset_path, fixed=obj.fix_base_link, scale=obj.scale),
+                        )
+                    else:
+                        # Treat all other formats (e.g., .obj, .stl, .ply, .usd) as meshes.
+                        obj_inst = self.scene_inst.add_entity(
+                            gs.morphs.Mesh(file=asset_path, scale=obj.scale),
+                        )
+
+                    log.info(
+                        f"[Genesis] Successfully loaded object '{obj.name}' from '{asset_path}' (ext='{ext}').")
+                except Exception as e:
+                    log.warning(
+                        f"[Genesis] Failed to load object '{obj.name}' from '{asset_path}' (ext='{ext}'): {e}")
+                    continue
             else:
                 raise NotImplementedError(f"Object type {type(obj)} not supported")
             self.object_inst_dict[obj.name] = obj_inst
@@ -141,11 +184,17 @@ class GenesisHandler(BaseSimHandler):
             n_envs=self.scenario.num_envs, env_spacing=(self.scenario.env_spacing, self.scenario.env_spacing)
         )
 
-        # POST-BUILD SETUP
-        # 1. Reset ONLY the robot's initial pose to origin to match Sapien
-        log.info("Resetting initial ROBOT pose to origin to match Sapien3 behavior.")
-        initial_pos = np.zeros((self.scenario.num_envs, 3))
-        initial_quat = np.array([[1.0, 0.0, 0.0, 0.0]] * self.scenario.num_envs)
+
+        rb_pos_cfg = getattr(self.robot, "default_position", (0.0, 0.0, 0.0))
+        rb_quat_cfg = getattr(self.robot, "default_orientation", (1.0, 0.0, 0.0, 0.0))  # w,x,y,z or x,y,z,w?
+
+        rb_pos_corrected = (-rb_pos_cfg[0], -rb_pos_cfg[1], rb_pos_cfg[2])
+        initial_pos = np.array([rb_pos_corrected] * self.scenario.num_envs, dtype=np.float32)
+
+        if len(rb_quat_cfg) == 4 and abs(rb_quat_cfg[3]) > 0.99:
+            rb_quat_cfg = (rb_quat_cfg[3], rb_quat_cfg[0], rb_quat_cfg[1], rb_quat_cfg[2])
+        initial_quat = np.array([rb_quat_cfg] * self.scenario.num_envs, dtype=np.float32)
+
         self.robot_inst.set_pos(initial_pos)
         self.robot_inst.set_quat(initial_quat)
 
@@ -254,6 +303,17 @@ class GenesisHandler(BaseSimHandler):
         for obj in self.objects + [self.robot]:
             obj_inst = self.object_inst_dict[obj.name]
 
+            # -------------------------------------------------------------
+            # Trajectory / init_states may not include every object defined
+            # in the current scenario. When the state dict for this object is
+            # missing, we skip updating its pose instead of raising an error.
+            # -------------------------------------------------------------
+            if any(obj.name not in states_flat[env_id] for env_id in env_ids):
+                log.warning(
+                    f"[Genesis] No state data found for object '{obj.name}' in the provided trajectory; "
+                    "keeping its current pose defined in the scenario config.")
+                continue
+
             # Correct POSITION
             pos_data = np.array([states_flat[env_id][obj.name]["pos"] for env_id in env_ids])
             pos_data[:, 0] *= -1
@@ -320,6 +380,22 @@ class GenesisHandler(BaseSimHandler):
     def _simulate(self):
         for _ in range(self.scenario.decimation):
             self.scene_inst.step()
+
+        self._robot_contacts = []
+        try:
+            contacts = self.scene_inst.get_contacts()
+            for c in contacts:
+                if c.actor0 == self.robot_inst or c.actor1 == self.robot_inst:
+                    other = c.actor1 if c.actor0 == self.robot_inst else c.actor0
+                    self._robot_contacts.append((self.robot.name, other.name, c))
+                    log.info(f"[Collision][Genesis] robot ↔ {other.name}, impulse={getattr(c, 'impulse', 'N/A')}")
+        except AttributeError:
+            # get_contacts 可能在旧版本 Genesis 中不可用
+            pass
+
+    @property
+    def robot_contacts(self):
+        return getattr(self, "_robot_contacts", [])
 
     def refresh_render(self):
         if not self.headless:
