@@ -14,6 +14,7 @@ deploy
 debug/
 roboverse_demo/
 roboverse_demo
+roboverse_data/
 roboverse_data_dev/
 roboverse_data_dev
 roboverse_data_release/
