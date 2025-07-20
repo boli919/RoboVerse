@@ -44,7 +44,7 @@ class Args:
     random: RandomizationCfg = RandomizationCfg()
 
     ## Handlers
-    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco", "mjx"] = "isaaclab"
+    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco", "mjx"] = "sapien3"
     renderer: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "mujoco", "sapien2", "sapien3"] | None = None
 
     ## Others
@@ -131,61 +131,27 @@ class ObsSaver:
 ###########################################################
 ## Main
 ###########################################################
-def main():
-    camera = PinholeCameraCfg(pos=(1.5, -1.5, 1.5), look_at=(0.0, 0.0, 0.0))
-    scenario = ScenarioCfg(
-        task=args.task,
-        robots=[args.robot],
-        scene=args.scene,
-        cameras=[camera],
-        random=args.random,
-        render=args.render,
-        sim=args.sim,
-        renderer=args.renderer,
-        num_envs=args.num_envs,
-        try_add_table=args.try_add_table,
-        object_states=args.object_states,
-        split=args.split,
-        headless=args.headless,
-    )
-
-    num_envs: int = scenario.num_envs
-
-    tic = time.time()
-    if scenario.renderer is None:
-        log.info(f"Using simulator: {scenario.sim}")
-        env_class = get_sim_env_class(SimType(scenario.sim))
-        env = env_class(scenario)
-    else:
-        log.info(f"Using simulator: {scenario.sim}, renderer: {scenario.renderer}")
-        env_class_render = get_sim_env_class(SimType(scenario.renderer))
-        env_render = env_class_render(scenario)  # Isaaclab must launch right after import
-        env_class_physics = get_sim_env_class(SimType(scenario.sim))
-        env_physics = env_class_physics(scenario)  # Isaaclab must launch right after import
-        env = HybridSimEnv(env_physics, env_render)
-    toc = time.time()
-    log.trace(f"Time to launch: {toc - tic:.2f}s")
-
+def replay_single_trajectory(env, scenario, traj_path, args):
+    """Replays a single trajectory file."""
+    log.info(f"Replaying trajectory: {traj_path}")
     ## Data
     tic = time.time()
-    assert os.path.exists(scenario.task.traj_filepath), (
-        f"Trajectory file: {scenario.task.traj_filepath} does not exist."
-    )
+    assert os.path.exists(traj_path), f"Trajectory file: {traj_path} does not exist."
+    # Temporarily set the scenario's traj_filepath to the current file for get_traj
+    original_traj_filepath = scenario.task.traj_filepath
+    scenario.task.traj_filepath = traj_path
     init_states, all_actions, all_states = get_traj(
         scenario.task, scenario.robots[0], env.handler
-    )  # XXX: only support one robot
+    )
+    scenario.task.traj_filepath = original_traj_filepath  # Restore it
     toc = time.time()
     log.trace(f"Time to load data: {toc - tic:.2f}s")
-
-    ########################################################
-    ## Main
-    ########################################################
 
     obs_saver = ObsSaver(image_dir=args.save_image_dir, video_path=args.save_video_path)
 
     ## Reset before first step
     tic = time.time()
-    obs, extras = env.reset(states=init_states[:num_envs])
+    obs, extras = env.reset(states=init_states[:args.num_envs])
     toc = time.time()
     log.trace(f"Time to reset: {toc - tic:.2f}s")
     obs_saver.add(obs)
@@ -195,16 +161,14 @@ def main():
     while True:
         log.debug(f"Step {step}")
         tic = time.time()
-        if scenario.object_states:
-            ## TODO: merge states replay into env.step function
+        if args.object_states:
             if all_states is None:
                 raise ValueError("All states are None, please check the trajectory file")
-            states = get_states(all_states, step, num_envs)
+            states = get_states(all_states, step, args.num_envs)
             env.handler.set_states(states)
             env.handler.refresh_render()
             obs = env.handler.get_states()
 
-            ## XXX: hack
             success = env.handler.task.checker.check(env.handler)
             if success.any():
                 log.info(f"Env {success.nonzero().squeeze(-1).tolist()} succeeded!")
@@ -212,7 +176,7 @@ def main():
                 break
 
         else:
-            actions = get_actions(all_actions, step, num_envs, scenario.robots[0])
+            actions = get_actions(all_actions, step, args.num_envs, scenario.robots[0])
             obs, reward, success, time_out, extras = env.step(actions)
 
             if success.any():
@@ -238,6 +202,48 @@ def main():
             break
 
     obs_saver.save()
+
+
+def main():
+    camera = PinholeCameraCfg(pos=(-3, 0, 1), look_at=(0.0, 0.0, 0.0))
+    scenario = ScenarioCfg(
+        task=args.task,
+        robots=[args.robot],
+        scene=args.scene,
+        cameras=[camera],
+        random=args.random,
+        render=args.render,
+        sim=args.sim,
+        renderer=args.renderer,
+        num_envs=args.num_envs,
+        try_add_table=args.try_add_table,
+        object_states=args.object_states,
+        split=args.split,
+        headless=args.headless,
+    )
+
+    tic = time.time()
+    if scenario.renderer is None:
+        log.info(f"Using simulator: {scenario.sim}")
+        env_class = get_sim_env_class(SimType(scenario.sim))
+        env = env_class(scenario)
+    else:
+        log.info(f"Using simulator: {scenario.sim}, renderer: {scenario.renderer}")
+        env_class_render = get_sim_env_class(SimType(scenario.renderer))
+        env_render = env_class_render(scenario)
+        env_class_physics = get_sim_env_class(SimType(scenario.sim))
+        env_physics = env_class_physics(scenario)
+        env = HybridSimEnv(env_physics, env_render)
+    toc = time.time()
+    log.trace(f"Time to launch: {toc - tic:.2f}s")
+
+    traj_filepaths = scenario.task.traj_filepath
+    if not isinstance(traj_filepaths, list):
+        traj_filepaths = [traj_filepaths]
+
+    for traj_path in traj_filepaths:
+        replay_single_trajectory(env, scenario, traj_path, args)
+
     env.close()
 
 

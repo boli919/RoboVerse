@@ -48,12 +48,6 @@ class BenchmarkType(enum.Enum):
     ## humanoid
     HUMANOIDBENCH = "HumanoidBench"
 
-    ## dm_control
-    DMCONTROL = "DMControl"
-
-    ## OGBench
-    OGBENCH = "OGBench"
-
     ## Debug
     DEBUG = "Debug"
 

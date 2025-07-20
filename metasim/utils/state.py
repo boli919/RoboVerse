@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from itertools import chain
 
 import torch
@@ -135,8 +135,6 @@ class TensorState:
     """States of all cameras."""
     sensors: dict[str, SensorState]
     """States of all sensors."""
-    extras: dict = field(default_factory=dict)
-    """Extra information"""
 
 
 def join_tensor_states(tensor_states: list[TensorState]) -> TensorState:

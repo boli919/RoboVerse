@@ -20,7 +20,6 @@ dependencies = [
 isaaclab = [
     "protobuf<5",
     "pyglet<2",
-    "warp-lang<1.8",  # warp==1.8.0 has bug with IsaacLab v1.4.1
     "torch==2.4.0+cu118",
     "torchvision==0.19.0+cu118",
     "isaacsim==4.2.0.2",
@@ -42,10 +41,7 @@ mjx = ["mujoco-mjx>=3.2.7", "dm-control", "jax[cuda]"]
 sapien2 = ["mani-skill2 @ git+https://github.com/haosulab/ManiSkill.git@v0.5.3"]
 sapien3 = ["sapien>=3.0.0.b1"]
 pybullet = ["numpy<2", "pybullet"]
-genesis = [
-    "genesis-world",
-    "libigl==2.5.1",  # for genesis 0.2.1, see https://github.com/Genesis-Embodied-AI/Genesis/issues/1156#issuecomment-3069006079
-]
+genesis = ["genesis-world"]
 
 [tool.uv]
 index-strategy = "unsafe-best-match"

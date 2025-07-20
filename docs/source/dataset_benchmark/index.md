@@ -7,7 +7,6 @@
 
 tasks/overview
 tasks/descriptions
-tasks/task_groups
 ```
 
 ```{toctree}

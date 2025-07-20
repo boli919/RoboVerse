@@ -46,7 +46,6 @@ from rsl_rl.modules import *
 e = IPython.embed
 
 import wandb
-from loguru import logger as log
 
 
 class OnPolicyRunner:
@@ -69,7 +68,7 @@ class OnPolicyRunner:
             obs_context_len = self.env.obs_context_len
         else:
             obs_context_len = 1
-        args = kwargs['args']
+        args = kwargs["args"]
         actor_critic = actor_critic_class(
             self.env.num_obs,
             num_critic_obs,
@@ -203,7 +202,7 @@ class OnPolicyRunner:
 
         self.save(os.path.join(self.log_dir, f"model_{self.current_learning_iteration}.pt"))
 
-    def log(self, locs, width=67, pad=35):
+    def log(self, locs, width=80, pad=35):
         self.tot_timesteps += self.num_steps_per_env * self.env.num_envs
         self.tot_time += locs["collection_time"] + locs["learn_time"]
         iteration_time = locs["collection_time"] + locs["learn_time"]
@@ -306,7 +305,7 @@ class OnPolicyRunner:
             f"""{"Total time:":>{pad}} {tot_hrs:.0f} hrs {tot_mins:.0f} mins {tot_secs:.1f} s\n"""
             f"""{"ETA:":>{pad}} {eta_hrs:.0f} hrs {eta_mins:.0f} mins {eta_secs:.1f} s\n"""
         )
-        log.info(log_string)
+        print(log_string)
 
     def save(self, path, infos=None):
         torch.save(

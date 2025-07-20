@@ -31,7 +31,7 @@ def set_np_formatting():
     )
 
 
-@hydra.main(version_base="1.1", config_path="configs", config_name="default")
+@hydra.main(config_path="configs", config_name="default")
 def main(cfg: DictConfig):
     sim_name = cfg.environment.sim_name.lower()
     set_np_formatting()
@@ -45,47 +45,22 @@ def main(cfg: DictConfig):
 
     cprint("Start Building the Environment", "green", attrs=["bold"])
     task = get_task(cfg.train.task_name)
+    robot = get_robot(cfg.train.robot_name)
+    scenario = ScenarioCfg(task=task, robot=robot)
+    scenario.cameras = []
 
     tic = time.time()
+    scenario.num_envs = cfg.environment.num_envs
+    scenario.headless = cfg.environment.headless
 
-    if cfg.train.task_name.startswith("dmcontrol:") or (
-        cfg.train.robot_name == "none" and not cfg.train.task_name.startswith("ogbench:")
-    ):
-        scenario = ScenarioCfg(task=task(), robots=[])
-        scenario.cameras = []
-        scenario.num_envs = cfg.environment.num_envs
-        scenario.headless = cfg.environment.headless
+    env_class = get_sim_env_class(SimType(sim_name))
+    if sim_name == "mujoco":
+        from metasim.sim import GymEnvWrapper
+        from metasim.sim.mujoco import MujocoHandler
+        from metasim.sim.parallel import ParallelSimWrapper
 
-        from metasim.cfg.tasks.dmcontrol.dmcontrol_env import DMControlEnv
-
-        env = DMControlEnv(scenario)
-    elif cfg.train.task_name.startswith("ogbench:"):
-        task_instance = task()
-        task_instance.traj_filepath = None
-        scenario = ScenarioCfg(task=task_instance, robots=[])
-        scenario.cameras = []
-        scenario.num_envs = cfg.environment.num_envs
-        scenario.headless = cfg.environment.headless
-
-        from metasim.cfg.tasks.ogbench.ogbench_env import OGBenchEnv
-
-        env = OGBenchEnv(scenario=scenario, handler=None)
-    else:
-        robot = get_robot(cfg.train.robot_name)
-        scenario = ScenarioCfg(task=task(), robots=[robot])
-        scenario.cameras = []
-
-        scenario.num_envs = cfg.environment.num_envs
-        scenario.headless = cfg.environment.headless
-
-        env_class = get_sim_env_class(SimType(sim_name))
-        if sim_name == "mujoco":
-            from metasim.sim import GymEnvWrapper
-            from metasim.sim.mujoco import MujocoHandler
-            from metasim.sim.parallel import ParallelSimWrapper
-
-            env_class = GymEnvWrapper(ParallelSimWrapper(MujocoHandler))
-        env = env_class(scenario)
+        env_class = GymEnvWrapper(ParallelSimWrapper(MujocoHandler))
+    env = env_class(scenario)
 
     env = RLEnvWrapper(
         gym_env=env,
@@ -103,9 +78,7 @@ def main(cfg: DictConfig):
     os.makedirs(output_dif, exist_ok=True)
 
     algo_name = cfg.train.algo.lower()
-    resolved_cfg = OmegaConf.to_container(cfg, resolve=True)
-
-    agent = get_algorithm(algo_name, env=env, output_dif=output_dif, full_config=resolved_cfg)
+    agent = get_algorithm(algo_name, env=env, output_dif=output_dif, full_config=OmegaConf.to_container(cfg))
 
     log.info(f"Algorithm: {cfg.train.algo}")
     log.info(f"Number of environments: {cfg.environment.num_envs}")

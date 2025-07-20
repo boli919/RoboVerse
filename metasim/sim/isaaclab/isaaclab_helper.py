@@ -1,4 +1,5 @@
 import os
+from typing import List, Optional, Tuple, Union
 
 import torch
 from loguru import logger as log
@@ -133,7 +134,7 @@ def _add_object(env: "EmptyEnv", obj: BaseObjCfg) -> None:
     raise ValueError(f"Unsupported object type: {type(obj)}")
 
 
-def add_objects(env: "EmptyEnv", objects: list[BaseObjCfg]) -> None:
+def add_objects(env: "EmptyEnv", objects: List[BaseObjCfg]) -> None:
     for obj in objects:
         _add_object(env, obj)
 
@@ -176,7 +177,7 @@ def _add_robot(env: "EmptyEnv", robot: BaseRobotCfg) -> None:
     env.robots.append(robot_inst)
 
 
-def add_robots(env: "EmptyEnv", robots: list[BaseRobotCfg]) -> None:
+def add_robots(env: "EmptyEnv", robots: List[BaseRobotCfg]) -> None:
     env.robots = []
     for robot in robots:
         _add_robot(env, robot)
@@ -213,7 +214,7 @@ def _add_light(env: "EmptyEnv", light: BaseLightCfg, prim_path: str) -> None:
         raise ValueError(f"Unsupported light type: {type(light)}")
 
 
-def add_lights(env: "EmptyEnv", lights: list[BaseLightCfg]) -> None:
+def add_lights(env: "EmptyEnv", lights: List[BaseLightCfg]) -> None:
     for i, light in enumerate(lights):
         if light.is_global:
             _add_light(env, light, f"/World/lights/light_{i}")
@@ -275,7 +276,7 @@ def _add_contact_force_sensor(env: "EmptyEnv", sensor: ContactForceSensorCfg) ->
         )
 
 
-def add_sensors(env: "EmptyEnv", sensors: list[BaseSensorCfg]) -> None:
+def add_sensors(env: "EmptyEnv", sensors: List[BaseSensorCfg]) -> None:
     for sensor in sensors:
         if isinstance(sensor, ContactForceSensorCfg):
             _add_contact_force_sensor(env, sensor)
@@ -315,7 +316,7 @@ def _add_pinhole_camera(env: "EmptyEnv", camera: PinholeCameraCfg) -> None:
     )
 
 
-def add_cameras(env: "EmptyEnv", cameras: list[BaseCameraCfg]) -> None:
+def add_cameras(env: "EmptyEnv", cameras: List[BaseCameraCfg]) -> None:
     for camera in cameras:
         if isinstance(camera, PinholeCameraCfg):
             _add_pinhole_camera(env, camera)
@@ -324,8 +325,8 @@ def add_cameras(env: "EmptyEnv", cameras: list[BaseCameraCfg]) -> None:
 
 
 def get_pose(
-    env: "EmptyEnv", obj_name: str, obj_subpath: str | None = None, env_ids: list[int] | None = None
-) -> tuple[torch.FloatTensor, torch.FloatTensor]:
+    env: "EmptyEnv", obj_name: str, obj_subpath: Optional[str] = None, env_ids: Optional[List[int]] = None
+) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
     try:
         from omni.isaac.core.prims import RigidPrimView
 
@@ -387,7 +388,7 @@ def joint_is_implicit_actuator(joint_name: str, obj_inst) -> bool:
     return isinstance(actuator, ImplicitActuatorCfg)
 
 
-def _update_tiled_camera_pose(env: "EmptyEnv", cameras: list[BaseCameraCfg]):
+def _update_tiled_camera_pose(env: "EmptyEnv", cameras: List[BaseCameraCfg]):
     for camera in cameras:
         camera_inst = env.scene.sensors[camera.name]
         pos, quat = camera_inst._view.get_world_poses()

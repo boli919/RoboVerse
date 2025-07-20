@@ -9,14 +9,12 @@ import random
 from dataclasses import dataclass
 from typing import Literal
 
-import gymnasium as gym
 import numpy as np
 import torch
 import tyro
 from gymnasium import spaces
 from gymnasium.vector import VectorEnv
 from loguru import logger as log
-from packaging.version import Version
 from rich.logging import RichHandler
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import VecEnv
@@ -25,13 +23,13 @@ from metasim.cfg.scenario import ScenarioCfg
 from metasim.constants import SimType
 from metasim.sim import BaseSimHandler, EnvWrapper
 from metasim.utils.demo_util import get_traj
-from metasim.utils.setup_util import get_sim_env_class, register_task
+from metasim.utils.setup_util import get_sim_env_class
 
 log.configure(handlers=[{"sink": RichHandler(), "format": "{message}"}])
 
 
 @dataclass
-class Args:
+class Args(ScenarioCfg):
     task: str = "debug:reach_origin"
     robot: str = "franka"
     num_envs: int = 16
@@ -52,7 +50,8 @@ class MetaSimVecEnv(VectorEnv):
         num_envs: int | None = 4,
     ):
         if scenario is None:
-            scenario = ScenarioCfg(task=task_name, robots=["franka"])
+            scenario = ScenarioCfg(task="pick_cube", robot="franka")
+            scenario.task = task_name
             scenario.num_envs = num_envs
             scenario = ScenarioCfg(**vars(scenario))
         self.num_envs = scenario.num_envs
@@ -68,8 +67,6 @@ class MetaSimVecEnv(VectorEnv):
         # XXX: is the inf space ok?
         self.single_observation_space = spaces.Box(-np.inf, np.inf)
         self.single_action_space = spaces.Box(-np.inf, np.inf)
-        self.observation_space = spaces.Box(-np.inf, np.inf)
-        self.action_space = spaces.Box(-np.inf, np.inf)
 
     ############################################################
     ## Gym-like interface
@@ -154,8 +151,7 @@ class StableBaseline3VecEnv(VecEnv):
 
     def step_async(self, actions: np.ndarray) -> None:
         self.action_dicts = [
-            {args.robot: {"dof_pos_target": dict(zip(self.env.scenario.robots[0].joint_limits.keys(), action))}}
-            for action in actions
+            {"dof_pos_target": dict(zip(self.env.scenario.robots[0].joint_limits.keys(), action))} for action in actions
         ]
 
     def step_wait(self):
@@ -204,16 +200,12 @@ class StableBaseline3VecEnv(VecEnv):
 
 def train_ppo():
     ## Choice 1: use scenario config to initialize the environment
-    # scenario = ScenarioCfg(task=args.task, robots=[args.robot], num_envs=args.num_envs, sim=args.sim)
-    # scenario.cameras = []  # XXX: remove cameras to avoid rendering to speed up
-    # metasim_env = MetaSimVecEnv(scenario, task_name=args.task, num_envs=args.num_envs, sim=args.sim)
+    scenario = ScenarioCfg(**vars(args))
+    scenario.cameras = []  # XXX: remove cameras to avoid rendering to speed up
+    metasim_env = MetaSimVecEnv(scenario, task_name=args.task, num_envs=args.num_envs, sim=args.sim)
 
     ## Choice 2: use gym.make to initialize the environment
-    register_task(args.task)
-    if Version(gym.__version__) < Version("1"):
-        metasim_env = gym.make(args.task, num_envs=args.num_envs)
-    else:
-        metasim_env = gym.make_vec(args.task, num_envs=args.num_envs)
+    # metasim_env = gym.make("reach_origin", num_envs=args.num_envs)
     env = StableBaseline3VecEnv(metasim_env)
 
     # PPO configuration

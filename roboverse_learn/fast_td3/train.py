@@ -40,7 +40,7 @@ from wrapper import FastTD3EnvWrapper
 from metasim.cfg.scenario import ScenarioCfg
 from metasim.cfg.sensors import PinholeCameraCfg
 
-os.environ["CUDA_VISIBLE_DEVICES"] = "1"
+os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 torch.set_float32_matmul_precision("high")
 
 
@@ -258,13 +258,13 @@ def main() -> None:
         """
         video_path: str = cfg("video_path", "output/rollout.mp4")
         os.makedirs(os.path.dirname(video_path), exist_ok=True)
-        obs_normalizer.eval()
+
         env = FastTD3EnvWrapper(scenario_render, device=device)
-        # first frame after reset
+
+        obs_normalizer.eval()
         obs = env.reset()
         frames = [env.render()]
 
-        obs_normalizer.eval()
         for _ in range(env.max_episode_steps):
             with torch.no_grad(), autocast(device_type=amp_device_type, dtype=amp_dtype, enabled=amp_enabled):
                 act = actor(obs_normalizer(obs))
@@ -272,9 +272,10 @@ def main() -> None:
             frames.append(env.render())
             if done.any():
                 break
-        obs_normalizer.train()
-        print(f"[render_with_rollout] MP4 saved to {video_path}")
+
         env.close()
+        obs_normalizer.train()
+
         iio.mimsave(video_path, frames, fps=30)
         return frames
 

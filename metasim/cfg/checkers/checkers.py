@@ -393,10 +393,16 @@ class _UpAxisRotationChecker(BaseChecker):
 @configclass
 class _SlideChecker(BaseChecker):
     def check(self, handler: BaseSimHandler) -> torch.BoolTensor:
-        from metasim.utils.humanoid_robot_util import torso_upright_tensor
+        from metasim.utils.humanoid_robot_util import torso_upright
 
         states = handler.get_states()
-        return torso_upright_tensor(states, handler._robot.name) < 0.6
+        terminated = []
+        for state in states:
+            if torso_upright(state, handler._robot.name) < 0.6:
+                terminated.append(True)
+            else:
+                terminated.append(False)
+        return torch.tensor(terminated)
 
 
 ## FIXME: This checker should be removed!
@@ -426,7 +432,8 @@ class _RunChecker(_WalkChecker):
 @configclass
 class _CrawlChecker(BaseChecker):
     def check(self, handler: BaseSimHandler) -> torch.BoolTensor:
-        terminated = [False] * handler.num_envs
+        states = handler.get_states()
+        terminated = [False] * len(states)
         return torch.tensor(terminated)
 
 
@@ -475,22 +482,32 @@ class _PoleChecker(BaseChecker):
 @configclass
 class _SitChecker(BaseChecker):
     def check(self, handler: BaseSimHandler) -> torch.BoolTensor:
-        from metasim.utils.humanoid_robot_util import robot_position_tensor
+        from metasim.utils.humanoid_robot_util import robot_position
 
         states = handler.get_states()
-        pelvis_z = robot_position_tensor(states, handler.robot.name)[:, 2]
-        terminated = pelvis_z < 0.5  # (B,) bool
-        return terminated
+        terminated = []
+        for state in states:
+            if robot_position(state, handler.robot.name)[2] < 0.5:
+                terminated.append(True)
+            else:
+                terminated.append(False)
+        return torch.tensor(terminated)
 
 
 ## FIXME: This checker should be removed!
 @configclass
 class _StairChecker(BaseChecker):
     def check(self, handler: BaseSimHandler) -> torch.BoolTensor:
-        from metasim.utils.humanoid_robot_util import torso_upright_tensor
+        from metasim.utils.humanoid_robot_util import torso_upright
 
         states = handler.get_states()
-        return torso_upright_tensor(states, handler.robot.name) < 0.1
+        terminated = []
+        for state in states:
+            if torso_upright(state, handler.robot.name) < 0.1:
+                terminated.append(True)
+            else:
+                terminated.append(False)
+        return torch.tensor(terminated)
 
 
 ## FIXME: This checker should be removed!

@@ -1,7 +1,7 @@
 # Environment settings
 sim: mjx
 robots: [h1]
-task: humanoidbench:Slide
+task: humanoidbench:Stand
 decimation: 10
 num_envs: 2048
 add_table: false
