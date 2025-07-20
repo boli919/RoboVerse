@@ -90,3 +90,5 @@ id_rsa*
 
 # for sapien
 *.convex.stl
+
+get_started/
