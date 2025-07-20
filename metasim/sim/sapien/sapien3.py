@@ -71,7 +71,11 @@ class Sapien3Handler(BaseSimHandler):
         ground_material = self.renderer.create_material()
         ground_material.base_color = np.array([202, 164, 114, 256]) / 256
         ground_material.specular = 0.5
-        self.scene.add_ground(altitude=0, render_material=ground_material)
+        # --- MODIFICATION START ---
+        # Create the ground actor first, then set its name for clarity in collision checks.
+        ground_actor = self.scene.add_ground(altitude=0, render_material=ground_material)
+        ground_actor.set_name("ground")
+        # --- MODIFICATION END ---
 
         self.load_scene()
 
@@ -283,6 +287,14 @@ class Sapien3Handler(BaseSimHandler):
     def _simulate(self):
         for i in range(self.scenario.decimation):
             self.scene.step()
+        
+        # --- MODIFICATION START ---
+        # Add collision check for physics-driven simulation
+        collisions = self.check_collisions_aabb()
+        if collisions:
+            log.info(f"💥 Physics-driven AABB Collision Detected: {collisions}")
+        # --- MODIFICATION END ---
+
         self.scene.update_render()
         if not self.headless:
             self.viewer.render()
@@ -337,9 +349,6 @@ class Sapien3Handler(BaseSimHandler):
                     joint_vel=torch.tensor(obj_inst.get_qvel()[joint_reindex], dtype=torch.float32).unsqueeze(0),
                 )
             else:
-                # This handles single rigid actors (from primitives or OBJ files)
-                # --- MODIFICATION START ---
-                # Find the physics component to get velocity from, instead of assuming its index.
                 rigid_component = None
                 for comp in obj_inst.get_components():
                     if isinstance(comp, sapien_core.physx.PhysxRigidBaseComponent):
@@ -352,7 +361,6 @@ class Sapien3Handler(BaseSimHandler):
                     vel = torch.tensor(rigid_component.get_linear_velocity(), dtype=torch.float32)
                     ang_vel = torch.tensor(rigid_component.get_angular_velocity(), dtype=torch.float32)
                 else:
-                    # Fallback if no physics component is found (e.g., for a purely visual object)
                     log.warning(f"Could not find a physics component for actor '{obj.name}'. Reporting zero velocity.")
                     pos = torch.tensor(pose.p, dtype=torch.float32)
                     rot = torch.tensor(pose.q, dtype=torch.float32)
@@ -361,7 +369,6 @@ class Sapien3Handler(BaseSimHandler):
 
                 root_state = torch.cat([pos, rot, vel, ang_vel], dim=-1).unsqueeze(0)
                 state = ObjectState(root_state=root_state, body_names=link_names, body_state=link_state.unsqueeze(0))
-                # --- MODIFICATION END ---
             object_states[obj.name] = state
 
         robot_states = {}
@@ -441,6 +448,13 @@ class Sapien3Handler(BaseSimHandler):
 
             obj_id.set_pose(sapien_core.Pose(p=val["pos"], q=val["rot"]))
 
+        # --- MODIFICATION START ---
+        # Add collision check for kinematic replay
+        collisions = self.check_collisions_aabb()
+        if collisions:
+            log.info(f"💥 Kinematic AABB Collision Detected: {collisions}")
+        # --- MODIFICATION END ---
+
     @property
     def actions_cache(self) -> list[Action]:
         return self._actions_cache
@@ -482,6 +496,60 @@ class Sapien3Handler(BaseSimHandler):
         quat = R.from_matrix(rotation_matrix).as_quat()
         quat_sapien = np.array([quat[3], quat[0], quat[1], quat[2]])
         camera.set_pose(sapien_core.Pose(p=pos, q=quat_sapien))
+
+    # --- MODIFICATION START ---
+    def check_collisions_aabb(self) -> dict[str, set[str]]:
+        """
+        Checks for collisions between dynamic and static objects using a simple
+        Axis-Aligned Bounding Box (AABB) overlap test.
+        This method iterates through scene entities and checks their physics components
+        to determine if they are static or dynamic, then performs the AABB check.
+        """
+        collisions = {}
+        
+        # 1. Find all static and dynamic collision shapes in the scene by checking their components
+        static_shapes = []
+        dynamic_shapes = []
+
+        # Use get_all_entities() which is more robust than get_all_actors()
+        for entity in self.scene.get_all_entities():
+            # An entity can be an Actor, an Articulation, etc.
+            # We check its components to determine its nature.
+            for comp in entity.get_components():
+                if isinstance(comp, sapien_core.physx.PhysxRigidStaticComponent):
+                    bounds = comp.get_world_bounds()
+                    # The component's actor is the entity itself in this case
+                    static_shapes.append({'name': entity.get_name(), 'bounds': np.array(bounds)})
+
+                elif isinstance(comp, (sapien_core.physx.PhysxRigidDynamicComponent, sapien_core.physx.PhysxArticulationLinkComponent)):
+                    bounds = comp.get_world_bounds()
+                    # For articulations, the component has a get_actor() method which is the link actor.
+                    # For simple rigid bodies, the component's actor is the entity.
+                    actor = comp.get_actor() if hasattr(comp, 'get_actor') else entity
+                    dynamic_shapes.append({'name': actor.get_name(), 'bounds': np.array(bounds)})
+
+        # 2. Perform the collision check
+        for dyn_shape in dynamic_shapes:
+            dyn_bounds = dyn_shape['bounds']
+            dyn_min = dyn_bounds[:3]
+            dyn_max = dyn_bounds[3:]
+            
+            for static_shape in static_shapes:
+                static_min = static_shape['bounds'][:3]
+                static_max = static_shape['bounds'][3:]
+                
+                # AABB intersection test
+                is_overlapping = np.all(dyn_max >= static_min) and np.all(static_max >= dyn_min)
+                
+                if is_overlapping:
+                    dyn_name = dyn_shape['name']
+                    static_name = static_shape['name']
+                    if dyn_name not in collisions:
+                        collisions[dyn_name] = set()
+                    collisions[dyn_name].add(static_name)
+
+        return collisions
+    # --- MODIFICATION END ---
 
 
 Sapien3Env: type[EnvWrapper[Sapien3Handler]] = GymEnvWrapper(Sapien3Handler)
