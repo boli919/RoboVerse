@@ -1,7 +1,9 @@
-from .motion008048_v2_cfg import Motion008048V2Cfg
-from .motion008455_v2_cfg import Motion008455V2Cfg
+from .motion010629_v2_cfg import Motion010629V2Cfg
+from .motion000472_v2_cfg import Motion000472V2Cfg
+from .motion001566_v2_cfg import Motion001566V2Cfg
 
 __all__ = [
-    "Motion008048V2Cfg",
-    "Motion008455V2Cfg",
+    "Motion010629V2Cfg",
+    "Motion000472V2Cfg",
+    "Motion001566V2Cfg",
 ]

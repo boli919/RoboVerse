@@ -42,6 +42,7 @@ class Sapien3Handler(BaseSimHandler):
         super().__init__(scenario)
         self.headless = scenario.headless
         self._actions_cache: list[Action] = []
+        self._robot_contacts = []
 
     def load_scene(self):
         """Loads the scene into the simulation."""
@@ -71,11 +72,7 @@ class Sapien3Handler(BaseSimHandler):
         ground_material = self.renderer.create_material()
         ground_material.base_color = np.array([202, 164, 114, 256]) / 256
         ground_material.specular = 0.5
-        # --- MODIFICATION START ---
-        # Create the ground actor first, then set its name for clarity in collision checks.
-        ground_actor = self.scene.add_ground(altitude=0, render_material=ground_material)
-        ground_actor.set_name("ground")
-        # --- MODIFICATION END ---
+        self.scene.add_ground(altitude=0, render_material=ground_material)
 
         self.load_scene()
 
@@ -201,26 +198,49 @@ class Sapien3Handler(BaseSimHandler):
                 self.object_joint_order[object.name] = []
 
             elif isinstance(object, RigidObjCfg):
-                self.loader.fix_root_link = object.fix_base_link
-                self.loader.scale = object.scale[0]
-                file_path = object.urdf_path
-                curr_id: sapien_core.Entity
-                try:
-                    curr_id = self.loader.load(file_path)
-                except Exception as e:
-                    log.warning(f"Error loading {file_path}: {e}")
-                    curr_id_list = self.loader.load_multiple(file_path)
-                    for id_item in curr_id_list:
-                        if len(id_item):
-                            curr_id = id_item
-                            break
-                if isinstance(curr_id, list):
-                    curr_id = curr_id[0]
-                pose = sapien_core.Pose(p=object.default_position, q=object.default_orientation)
-                curr_id.set_pose(pose)
-                log.debug(f"[DEBUG] Loaded RigidObj '{object.name}' at pose: {pose}")
-                self.object_ids[object.name] = curr_id
-                self.object_joint_order[object.name] = []
+                is_mesh_load = hasattr(object, 'mesh_path') and object.mesh_path and object.mesh_path.endswith('.obj')
+                is_urdf_load = hasattr(object, 'urdf_path') and object.urdf_path
+
+                if is_urdf_load:
+                    self.loader.fix_root_link = object.fix_base_link
+                    self.loader.scale = object.scale[0]
+                    file_path = object.urdf_path
+                    curr_id: sapien_core.Entity
+                    try:
+                        curr_id = self.loader.load(file_path)
+                    except Exception as e:
+                        log.warning(f"Error loading {file_path}: {e}")
+                        curr_id_list = self.loader.load_multiple(file_path)
+                        for id_item in curr_id_list:
+                            if len(id_item):
+                                curr_id = id_item
+                                break
+                    if isinstance(curr_id, list):
+                        curr_id = curr_id[0]
+                    pose = sapien_core.Pose(p=object.default_position, q=object.default_orientation)
+                    curr_id.set_pose(pose)
+                    log.debug(f"[DEBUG] Loaded RigidObj '{object.name}' at pose: {pose}")
+                    self.object_ids[object.name] = curr_id
+                    self.object_joint_order[object.name] = []
+
+                elif is_mesh_load:
+                    log.info(f"Attempting to load .obj as rigid body: {object.mesh_path}")
+                    builder = self.scene.create_actor_builder()
+                    density = getattr(object, 'density', 1000.0)
+                    
+                    builder.add_convex_collision_from_file(filename=object.mesh_path, scale=object.scale, density=density)
+                    builder.add_visual_from_file(filename=object.mesh_path, scale=object.scale)
+                    
+                    actor = builder.build(name=object.name) if not object.fix_base_link else builder.build_static(name=object.name)
+                    pose = sapien_core.Pose(p=object.default_position, q=object.default_orientation)
+                    actor.set_pose(pose)
+                    log.debug(f"[DEBUG] Loaded OBJ '{object.name}' at pose: {pose}")
+
+                    self.object_ids[object.name] = actor
+                    self.object_joint_order[object.name] = []
+
+                else:
+                    log.warning(f"Object '{object.name}' has no valid urdf_path or mesh_path. Skipped.")
 
             if object.name in self.object_ids:
                 loaded_entity = self.object_ids[object.name]
@@ -287,13 +307,6 @@ class Sapien3Handler(BaseSimHandler):
     def _simulate(self):
         for i in range(self.scenario.decimation):
             self.scene.step()
-        
-        # --- MODIFICATION START ---
-        # Add collision check for physics-driven simulation
-        collisions = self.check_collisions_aabb()
-        if collisions:
-            log.info(f"💥 Physics-driven AABB Collision Detected: {collisions}")
-        # --- MODIFICATION END ---
 
         self.scene.update_render()
         if not self.headless:
@@ -320,8 +333,12 @@ class Sapien3Handler(BaseSimHandler):
             pose = link.get_pose()
             pos = torch.tensor(pose.p, dtype=torch.float32)
             rot = torch.tensor(pose.q, dtype=torch.float32)
-            vel = torch.tensor(link.get_linear_velocity(), dtype=torch.float32)
-            ang_vel = torch.tensor(link.get_angular_velocity(), dtype=torch.float32)
+            if isinstance(link, sapien.physx.PhysxRigidStaticComponent):
+                vel = torch.zeros(3, dtype=torch.float32)
+                ang_vel = torch.zeros(3, dtype=torch.float32)
+            else:
+                vel = torch.tensor(link.get_linear_velocity(), dtype=torch.float32)
+                ang_vel = torch.tensor(link.get_angular_velocity(), dtype=torch.float32)
             link_state = torch.cat([pos, rot, vel, ang_vel], dim=-1).unsqueeze(0)
             link_name_list.append(link.get_name())
             link_state_list.append(link_state)
@@ -358,8 +375,12 @@ class Sapien3Handler(BaseSimHandler):
                 if rigid_component:
                     pos = torch.tensor(pose.p, dtype=torch.float32)
                     rot = torch.tensor(pose.q, dtype=torch.float32)
-                    vel = torch.tensor(rigid_component.get_linear_velocity(), dtype=torch.float32)
-                    ang_vel = torch.tensor(rigid_component.get_angular_velocity(), dtype=torch.float32)
+                    if isinstance(rigid_component, sapien.physx.PhysxRigidStaticComponent):
+                        vel = torch.zeros(3, dtype=torch.float32)
+                        ang_vel = torch.zeros(3, dtype=torch.float32)
+                    else:
+                        vel = torch.tensor(rigid_component.get_linear_velocity(), dtype=torch.float32)
+                        ang_vel = torch.tensor(rigid_component.get_angular_velocity(), dtype=torch.float32)
                 else:
                     log.warning(f"Could not find a physics component for actor '{obj.name}'. Reporting zero velocity.")
                     pos = torch.tensor(pose.p, dtype=torch.float32)
@@ -425,11 +446,25 @@ class Sapien3Handler(BaseSimHandler):
         return TensorState(objects=object_states, robots=robot_states, cameras=camera_states, sensors={})
 
     def refresh_render(self):
+        log.debug("refresh_render called!")  # Confirm call
         self.scene.update_render()
         if not self.headless:
             self.viewer.render()
         for camera_name, camera_id in self.camera_ids.items():
             camera_id.take_picture()
+
+        # Add collision detection
+        self._robot_contacts = []
+        contacts = self.scene.get_contacts()
+        log.debug(f"Found {len(contacts)} contacts")  # Log number of contacts
+        for contact in contacts:
+            actor0 = contact.actor0.name if contact.actor0 else 'Unknown'
+            actor1 = contact.actor1.name if contact.actor1 else 'Unknown'
+            log.debug(f"Contact between {actor0} and {actor1}")  # Log each contact
+            if self.robot.name in (actor0, actor1):
+                other = actor1 if actor0 == self.robot.name else actor0
+                self._robot_contacts.append((self.robot.name, other, contact))
+                log.info(f"[Collision][Sapien3] robot ↔ {other}")
 
     def _set_states(self, states, env_ids=None):
         if isinstance(states, list):
@@ -447,13 +482,6 @@ class Sapien3Handler(BaseSimHandler):
                 obj_id.set_qpos(np.array(qpos_list))
 
             obj_id.set_pose(sapien_core.Pose(p=val["pos"], q=val["rot"]))
-
-        # --- MODIFICATION START ---
-        # Add collision check for kinematic replay
-        collisions = self.check_collisions_aabb()
-        if collisions:
-            log.info(f"💥 Kinematic AABB Collision Detected: {collisions}")
-        # --- MODIFICATION END ---
 
     @property
     def actions_cache(self) -> list[Action]:
@@ -497,59 +525,9 @@ class Sapien3Handler(BaseSimHandler):
         quat_sapien = np.array([quat[3], quat[0], quat[1], quat[2]])
         camera.set_pose(sapien_core.Pose(p=pos, q=quat_sapien))
 
-    # --- MODIFICATION START ---
-    def check_collisions_aabb(self) -> dict[str, set[str]]:
-        """
-        Checks for collisions between dynamic and static objects using a simple
-        Axis-Aligned Bounding Box (AABB) overlap test.
-        This method iterates through scene entities and checks their physics components
-        to determine if they are static or dynamic, then performs the AABB check.
-        """
-        collisions = {}
-        
-        # 1. Find all static and dynamic collision shapes in the scene by checking their components
-        static_shapes = []
-        dynamic_shapes = []
-
-        # Use get_all_entities() which is more robust than get_all_actors()
-        for entity in self.scene.get_all_entities():
-            # An entity can be an Actor, an Articulation, etc.
-            # We check its components to determine its nature.
-            for comp in entity.get_components():
-                if isinstance(comp, sapien_core.physx.PhysxRigidStaticComponent):
-                    bounds = comp.get_world_bounds()
-                    # The component's actor is the entity itself in this case
-                    static_shapes.append({'name': entity.get_name(), 'bounds': np.array(bounds)})
-
-                elif isinstance(comp, (sapien_core.physx.PhysxRigidDynamicComponent, sapien_core.physx.PhysxArticulationLinkComponent)):
-                    bounds = comp.get_world_bounds()
-                    # For articulations, the component has a get_actor() method which is the link actor.
-                    # For simple rigid bodies, the component's actor is the entity.
-                    actor = comp.get_actor() if hasattr(comp, 'get_actor') else entity
-                    dynamic_shapes.append({'name': actor.get_name(), 'bounds': np.array(bounds)})
-
-        # 2. Perform the collision check
-        for dyn_shape in dynamic_shapes:
-            dyn_bounds = dyn_shape['bounds']
-            dyn_min = dyn_bounds[:3]
-            dyn_max = dyn_bounds[3:]
-            
-            for static_shape in static_shapes:
-                static_min = static_shape['bounds'][:3]
-                static_max = static_shape['bounds'][3:]
-                
-                # AABB intersection test
-                is_overlapping = np.all(dyn_max >= static_min) and np.all(static_max >= dyn_min)
-                
-                if is_overlapping:
-                    dyn_name = dyn_shape['name']
-                    static_name = static_shape['name']
-                    if dyn_name not in collisions:
-                        collisions[dyn_name] = set()
-                    collisions[dyn_name].add(static_name)
-
-        return collisions
-    # --- MODIFICATION END ---
+    @property
+    def robot_contacts(self):
+        return self._robot_contacts
 
 
 Sapien3Env: type[EnvWrapper[Sapien3Handler]] = GymEnvWrapper(Sapien3Handler)

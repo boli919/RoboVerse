@@ -205,7 +205,7 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
 
 def main():
-    camera = PinholeCameraCfg(pos=(-3, 0, 1), look_at=(0.0, 0.0, 0.0))
+    camera = PinholeCameraCfg(pos=(3, 0, 3), look_at=(0.0, 0.0, 0.0))
     scenario = ScenarioCfg(
         task=args.task,
         robots=[args.robot],

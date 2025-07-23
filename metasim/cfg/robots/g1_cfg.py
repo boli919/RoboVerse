@@ -33,7 +33,7 @@ class G1Cfg(BaseRobotCfg):
 
     enabled_gravity: bool = True
     # Set to True for fixing the base link during debugging to prevent root body dynamics.
-    fix_base_link: bool = False
+    fix_base_link: bool = True
     enabled_self_collisions: bool = False
     isaacgym_flip_visual_attachments: bool = False
     collapse_fixed_joints: bool = True

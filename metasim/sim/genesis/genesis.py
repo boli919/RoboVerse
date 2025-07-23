@@ -221,6 +221,48 @@ class GenesisHandler(BaseSimHandler):
                     quat_to_set = (quat_to_set[3], quat_to_set[0], quat_to_set[1], quat_to_set[2])
                 ent.set_quat(np.array([quat_to_set] * self.num_envs))
 
+        # 3. Set initial poses for all other objects from the scenario config
+        log.info("Setting initial poses for scenario objects...")
+        for obj_cfg in self.scenario.objects:
+            if obj_cfg.name not in self.object_inst_dict:
+                # log.warning(f"Object '{obj_cfg.name}' was configured but not found in instantiated objects. Skipping pose setting.")
+                continue
+
+            ent = self.object_inst_dict[obj_cfg.name]
+
+            # Correct and set POSITION
+            pos_to_set = getattr(obj_cfg, "default_position", None)
+            if pos_to_set is not None:
+                log.info(f"Setting initial position for '{obj_cfg.name}': {pos_to_set}")
+                # Apply coordinate system correction for Genesis
+                transformed_pos = np.array(pos_to_set, dtype=np.float32)
+                transformed_pos[0] *= -1  # x' = -x
+                transformed_pos[1] *= -1  # y' = -y
+                pos_array = np.array([transformed_pos] * self.num_envs)
+                ent.set_pos(pos_array)
+
+            # Correct and set ROTATION
+            quat_to_set = getattr(obj_cfg, "default_orientation", None)
+            if quat_to_set is not None:
+                log.info(f"Setting initial orientation for '{obj_cfg.name}': {quat_to_set}")
+                
+                # Ensure the input quaternion is a numpy array for all environments
+                rot_data = np.array([quat_to_set] * self.num_envs, dtype=np.float32)
+                
+                # Config format is (x, y, z, w), which Scipy's from_quat expects.
+                initial_rotation = Rotation.from_quat(rot_data)
+                
+                # Apply the 180-degree Z-axis rotation to correct the coordinate system.
+                corrected_rotation = self.z_180_rotation * initial_rotation
+                
+                # Get the corrected quaternion in Scipy's (x, y, z, w) format.
+                corrected_quat_scipy = corrected_rotation.as_quat()
+                
+                # Convert from Scipy's (x, y, z, w) to Genesis's (w, x, y, z) format.
+                corrected_quat_genesis = corrected_quat_scipy[:, [3, 0, 1, 2]]
+                
+                ent.set_quat(rot_data)
+
     def _get_states(self, env_ids: list[int] | None = None) -> TensorState:
         if env_ids is None:
             env_ids = list(range(self.num_envs))
@@ -322,10 +364,12 @@ class GenesisHandler(BaseSimHandler):
 
             # Correct ROTATION
             rot_data = np.array([states_flat[env_id][obj.name]["rot"] for env_id in env_ids])
+            # The incoming data is (w, x, y, z), convert to Scipy's (x, y, z, w)
             rot_data_scipy = rot_data[:, [1, 2, 3, 0]]
             traj_rotation = Rotation.from_quat(rot_data_scipy)
             corrected_rotation = self.z_180_rotation * traj_rotation
             corrected_quat_scipy = corrected_rotation.as_quat()
+            # Convert back to Genesis's (w, x, y, z)
             corrected_quat_genesis = corrected_quat_scipy[:, [3, 0, 1, 2]]
             obj_inst.set_quat(corrected_quat_genesis)
 
@@ -390,7 +434,7 @@ class GenesisHandler(BaseSimHandler):
                     self._robot_contacts.append((self.robot.name, other.name, c))
                     log.info(f"[Collision][Genesis] robot ↔ {other.name}, impulse={getattr(c, 'impulse', 'N/A')}")
         except AttributeError:
-            # get_contacts 可能在旧版本 Genesis 中不可用
+            
             pass
 
     @property
