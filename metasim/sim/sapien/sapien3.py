@@ -43,6 +43,8 @@ class Sapien3Handler(BaseSimHandler):
         self.headless = scenario.headless
         self._actions_cache: list[Action] = []
         self._robot_contacts = []
+        # Store contacts between any two objects for the last refresh_render call
+        self._all_contacts = []
 
     def load_scene(self):
         """Loads the scene into the simulation."""
@@ -453,18 +455,22 @@ class Sapien3Handler(BaseSimHandler):
         for camera_name, camera_id in self.camera_ids.items():
             camera_id.take_picture()
 
-        # Add collision detection
+        # Add collision detection (log **all** contacts in the scene)
         self._robot_contacts = []
+        self._all_contacts = []
         contacts = self.scene.get_contacts()
         log.debug(f"Found {len(contacts)} contacts")  # Log number of contacts
         for contact in contacts:
             actor0 = contact.actor0.name if contact.actor0 else 'Unknown'
             actor1 = contact.actor1.name if contact.actor1 else 'Unknown'
-            log.debug(f"Contact between {actor0} and {actor1}")  # Log each contact
-            if self.robot.name in (actor0, actor1):
+            # Log every contact pair so user can see collisions between any two objects
+            log.info(f"[Collision][Sapien3] {actor0} ↔ {actor1}")
+            self._all_contacts.append((actor0, actor1, contact))
+
+            # Additionally keep the per-robot contacts list for backward compatibility
+            if self.robot and self.robot.name in (actor0, actor1):
                 other = actor1 if actor0 == self.robot.name else actor0
                 self._robot_contacts.append((self.robot.name, other, contact))
-                log.info(f"[Collision][Sapien3] robot ↔ {other}")
 
     def _set_states(self, states, env_ids=None):
         if isinstance(states, list):
@@ -528,6 +534,11 @@ class Sapien3Handler(BaseSimHandler):
     @property
     def robot_contacts(self):
         return self._robot_contacts
+
+    @property
+    def all_contacts(self):
+        """Return all contacts detected in the last ``refresh_render`` call."""
+        return self._all_contacts
 
 
 Sapien3Env: type[EnvWrapper[Sapien3Handler]] = GymEnvWrapper(Sapien3Handler)

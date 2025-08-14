@@ -93,3 +93,5 @@ id_rsa*
 *.convex.stl
 
 get_started/
+
+third_party/

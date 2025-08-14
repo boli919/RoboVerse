@@ -27,8 +27,8 @@ class G1Cfg(BaseRobotCfg):
 
     # NOTE: Make sure these asset files exist locally or can be fetched from
     # HuggingFace via `metasim.utils.hf_util`.
-    usd_path: str | None = "roboverse_data/robots/g1/usd/g1.usd"  # placeholder
-    mjcf_path: str | None = "roboverse_data/robots/g1/mjcf/g1.xml"  # placeholder
+    # usd_path: str | None = "roboverse_data/robots/g1/usd/g1.usd"  # placeholder
+    # mjcf_path: str | None = "roboverse_data/robots/g1/mjcf/g1.xml"  # placeholder
     urdf_path: str | None = "resources/robots/g1/g1.urdf"
 
     enabled_gravity: bool = True

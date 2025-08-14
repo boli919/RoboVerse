@@ -18,6 +18,8 @@ from numpy.typing import NDArray
 from rich.logging import RichHandler
 from torchvision.utils import make_grid, save_image
 from tyro import MISSING
+from PIL import Image
+import torch
 
 from metasim.cfg.randomization import RandomizationCfg
 from metasim.cfg.render import RenderCfg
@@ -58,6 +60,12 @@ class Args:
     save_image_dir: str | None = "tmp"
     save_video_path: str | None = None
     stop_on_runout: bool = False
+    
+    ## 新增：图片质量相关参数
+    camera_width: int = 1024  # 提升相机分辨率
+    camera_height: int = 1024
+    render_mode: Literal["rasterization", "raytracing", "pathtracing"] = "pathtracing"  # 使用最高质量渲染模式
+    save_quality: int = 95  # 图片保存质量 (0-100)
 
     def __post_init__(self):
         log.info(f"Args: {self}")
@@ -91,10 +99,11 @@ def get_runout(all_actions, action_idx: int):
 class ObsSaver:
     """Save the observations to images or videos."""
 
-    def __init__(self, image_dir: str | None = None, video_path: str | None = None):
+    def __init__(self, image_dir: str | None = None, video_path: str | None = None, save_quality: int = 95):
         """Initialize the ObsSaver."""
         self.image_dir = image_dir
         self.video_path = video_path
+        self.save_quality = save_quality
         self.images: list[NDArray] = []
 
         self.image_idx = 0
@@ -113,7 +122,15 @@ class ObsSaver:
 
         if self.image_dir is not None:
             os.makedirs(self.image_dir, exist_ok=True)
-            save_image(image, os.path.join(self.image_dir, f"rgb_{self.image_idx:04d}.png"))
+            # 使用PIL保存高质量图片
+            image_np = image.cpu().numpy().transpose(1, 2, 0)  # (H, W, C)
+            image_np = (image_np * 255).astype(np.uint8)
+            pil_image = Image.fromarray(image_np)
+            pil_image.save(
+                os.path.join(self.image_dir, f"rgb_{self.image_idx:04d}.png"),
+                quality=self.save_quality,
+                optimize=False
+            )
             self.image_idx += 1
 
         image = image.cpu().numpy().transpose(1, 2, 0)  # (H, W, C)
@@ -125,7 +142,14 @@ class ObsSaver:
         if self.video_path is not None and self.images:
             log.info(f"Saving video of {len(self.images)} frames to {self.video_path}")
             os.makedirs(os.path.dirname(self.video_path), exist_ok=True)
-            iio.mimsave(self.video_path, self.images, fps=30)
+            # 使用高质量视频保存参数
+            iio.mimsave(
+                self.video_path, 
+                self.images, 
+                fps=30,
+                quality=8,  # 高质量设置 (0-10)
+                codec='libx264' if self.video_path.endswith('.mp4') else None
+            )
 
 
 ###########################################################
@@ -147,7 +171,7 @@ def replay_single_trajectory(env, scenario, traj_path, args):
     toc = time.time()
     log.trace(f"Time to load data: {toc - tic:.2f}s")
 
-    obs_saver = ObsSaver(image_dir=args.save_image_dir, video_path=args.save_video_path)
+    obs_saver = ObsSaver(image_dir=args.save_image_dir, video_path=args.save_video_path, save_quality=args.save_quality)
 
     ## Reset before first step
     tic = time.time()
@@ -177,6 +201,10 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
         else:
             actions = get_actions(all_actions, step, args.num_envs, scenario.robots[0])
+            
+            # 调试信息
+            log.info(f"Step {step}: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
+            
             obs, reward, success, time_out, extras = env.step(actions)
 
             if success.any():
@@ -184,6 +212,7 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
             if time_out.any():
                 log.info(f"Env {time_out.nonzero().squeeze(-1).tolist()} timed out!")
+                log.info(f"After step: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
 
             if success.all() or time_out.all():
                 break
@@ -205,14 +234,32 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
 
 def main():
-    camera = PinholeCameraCfg(pos=(3, 0, 3), look_at=(0.0, 0.0, 0.0))
+    # 设置高质量渲染模式
+    render_cfg = RenderCfg(mode=args.render_mode)
+    
+    # 创建高分辨率相机配置
+    camera = PinholeCameraCfg(
+        pos=(3, 0, 3), 
+        look_at=(0.0, 0.0, 0.0),
+        width=args.camera_width,
+        height=args.camera_height,
+        focal_length=24.0,  # 保持默认焦距
+        horizontal_aperture=20.955  # 保持默认光圈
+    )
+    
+    # 显示图片质量设置信息
+    log.info(f"图片质量设置:")
+    log.info(f"  相机分辨率: {args.camera_width}x{args.camera_height}")
+    log.info(f"  渲染模式: {args.render_mode}")
+    log.info(f"  保存质量: {args.save_quality}/100")
+    
     scenario = ScenarioCfg(
         task=args.task,
         robots=[args.robot],
         scene=args.scene,
         cameras=[camera],
         random=args.random,
-        render=args.render,
+        render=render_cfg,  # 使用高质量渲染配置
         sim=args.sim,
         renderer=args.renderer,
         num_envs=args.num_envs,
