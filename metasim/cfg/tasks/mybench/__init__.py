@@ -1,5 +1,5 @@
-from .motionexample_v2_cfg import MotionExampleV2Cfg
+from .motion2_cfg import Motion2Cfg
 
 __all__ = [
-    "MotionExampleV2Cfg",
+    "Motion2Cfg",
 ]

@@ -20,6 +20,7 @@ from torchvision.utils import make_grid, save_image
 from tyro import MISSING
 from PIL import Image
 import torch
+import sapien.core as sapien_core
 
 from metasim.cfg.randomization import RandomizationCfg
 from metasim.cfg.render import RenderCfg
@@ -61,11 +62,20 @@ class Args:
     save_video_path: str | None = None
     stop_on_runout: bool = False
     
-    ## 新增：图片质量相关参数
-    camera_width: int = 1024  # 提升相机分辨率
-    camera_height: int = 1024
-    render_mode: Literal["rasterization", "raytracing", "pathtracing"] = "pathtracing"  # 使用最高质量渲染模式
-    save_quality: int = 95  # 图片保存质量 (0-100)
+    ## New: Image quality parameters
+    camera_width: int = 1920  # Increase camera resolution
+    camera_height: int = 1080
+    render_mode: Literal["rasterization", "raytracing", "pathtracing"] = "pathtracing"  # Use the highest quality rendering mode
+    save_quality: int = 95  # Image save quality (0-100)
+    
+    ## New: Robot position control
+    robot_height_offset: float = 0.0  # Robot initial height offset (meters)
+    
+    ## New: First-person camera settings
+    first_person_view: bool = False  # Enable first-person view
+    head_link_name: str = "head_link"  # Robot head link name
+    camera_offset: tuple[float, float, float] = (0.1, 0.0, 0.5)  # Camera offset relative to the head (x, y, z)
+    camera_direction: tuple[float, float, float] = (1.0, 0.0, -0.577)  # Camera direction vector (forward, right, up). (1, 0, -1) is 45 degrees down.
 
     def __post_init__(self):
         log.info(f"Args: {self}")
@@ -122,7 +132,7 @@ class ObsSaver:
 
         if self.image_dir is not None:
             os.makedirs(self.image_dir, exist_ok=True)
-            # 使用PIL保存高质量图片
+            # Use PIL to save high-quality images
             image_np = image.cpu().numpy().transpose(1, 2, 0)  # (H, W, C)
             image_np = (image_np * 255).astype(np.uint8)
             pil_image = Image.fromarray(image_np)
@@ -142,14 +152,91 @@ class ObsSaver:
         if self.video_path is not None and self.images:
             log.info(f"Saving video of {len(self.images)} frames to {self.video_path}")
             os.makedirs(os.path.dirname(self.video_path), exist_ok=True)
-            # 使用高质量视频保存参数
+            # Use high-quality video saving parameters
             iio.mimsave(
                 self.video_path, 
                 self.images, 
                 fps=30,
-                quality=8,  # 高质量设置 (0-10)
+                quality=8,  # High quality setting (0-10)
                 codec='libx264' if self.video_path.endswith('.mp4') else None
             )
+
+
+###########################################################
+## Camera Utilities
+###########################################################
+def update_camera_poses(env, args):
+    """
+    Update camera poses to follow the robot's head.
+    
+    Args:
+        env: The simulation environment.
+        args: Command line arguments.
+    """
+    if not args.first_person_view:
+        return
+        
+    # Ensure handler exists
+    if not hasattr(env, 'handler'):
+        log.warning("Environment does not have a handler attribute, cannot update camera poses")
+        return
+        
+    handler = env.handler
+    
+    # Ensure robot and cameras exist
+    if not hasattr(handler, 'robot') or not handler.robot:
+        log.warning("Robot not found, cannot update camera poses")
+        return
+        
+    if not hasattr(handler, 'camera_ids') or not handler.camera_ids:
+        log.warning("Cameras not found, cannot update camera poses")
+        return
+    
+    # Get the robot head link pose
+    robot_name = handler.robot.name
+    try:
+        # Find the head link
+        head_link = None
+        for link in handler.link_ids.get(robot_name, []):
+            if link.get_name() == args.head_link_name:
+                head_link = link
+                break
+                
+        if head_link is None:
+            log.warning(f"Head link '{args.head_link_name}' not found, cannot update camera poses")
+            # Print all available link names for reference
+            available_links = [link.get_name() for link in handler.link_ids.get(robot_name, [])]
+            log.info(f"Available links: {available_links}")
+            return
+            
+        # Get the position and orientation of the head link
+        head_pose = head_link.get_pose()
+        head_pos = head_pose.p
+        head_rot = head_pose.q
+        
+        # Calculate camera position (relative to the head)
+        offset = np.array(args.camera_offset)
+        
+        # Convert the offset from the head's local coordinate system to the world coordinate system
+        from scipy.spatial.transform import Rotation as R
+        rot = R.from_quat([head_rot[1], head_rot[2], head_rot[3], head_rot[0]])  # Sapien uses w,x,y,z order
+        offset_world = rot.apply(offset)
+        
+        camera_pos = head_pos + offset_world
+        
+        # Calculate camera direction (relative to the head)
+        direction = np.array(args.camera_direction)
+        direction_world = rot.apply(direction)
+        look_at = camera_pos + direction_world
+        
+        # Update the poses of all cameras
+        for camera_name, camera_id in handler.camera_ids.items():
+            handler.set_camera_look_at(camera_name, camera_pos, look_at)
+            
+        log.debug(f"Updated camera pose: pos={camera_pos}, look_at={look_at}")
+        
+    except Exception as e:
+        log.error(f"Error updating camera poses: {e}")
 
 
 ###########################################################
@@ -175,7 +262,22 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
     ## Reset before first step
     tic = time.time()
+    
+    # Apply robot height offset
+    if args.robot_height_offset != 0.0:
+        for state in init_states[:args.num_envs]:
+            # Assume robot position is in state.root_pos
+            if hasattr(state, 'root_pos'):
+                state.root_pos[2] += args.robot_height_offset
+            # For some robot models, other position parameters may need to be adjusted
+            
     obs, extras = env.reset(states=init_states[:args.num_envs])
+    
+    # If in first-person view mode, update camera poses immediately after reset
+    if args.first_person_view:
+        update_camera_poses(env, args)
+        env.handler.refresh_render()  # Refresh the render to apply camera updates
+        
     toc = time.time()
     log.trace(f"Time to reset: {toc - tic:.2f}s")
     obs_saver.add(obs)
@@ -190,6 +292,11 @@ def replay_single_trajectory(env, scenario, traj_path, args):
                 raise ValueError("All states are None, please check the trajectory file")
             states = get_states(all_states, step, args.num_envs)
             env.handler.set_states(states)
+            
+            # If in first-person view mode, ensure camera poses are updated
+            if args.first_person_view:
+                update_camera_poses(env, args)
+                
             env.handler.refresh_render()
             obs = env.handler.get_states()
 
@@ -202,10 +309,14 @@ def replay_single_trajectory(env, scenario, traj_path, args):
         else:
             actions = get_actions(all_actions, step, args.num_envs, scenario.robots[0])
             
-            # 调试信息
+            # Debugging info
             log.info(f"Step {step}: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
             
             obs, reward, success, time_out, extras = env.step(actions)
+            
+            # If in first-person view mode, ensure camera poses are updated
+            if args.first_person_view:
+                update_camera_poses(env, args)
 
             if success.any():
                 log.info(f"Env {success.nonzero().squeeze(-1).tolist()} succeeded!")
@@ -234,24 +345,50 @@ def replay_single_trajectory(env, scenario, traj_path, args):
 
 
 def main():
-    # 设置高质量渲染模式
+    # Set high-quality rendering mode
     render_cfg = RenderCfg(mode=args.render_mode)
     
-    # 创建高分辨率相机配置
-    camera = PinholeCameraCfg(
-        pos=(3, 0, 3), 
-        look_at=(0.0, 0.0, 0.0),
-        width=args.camera_width,
-        height=args.camera_height,
-        focal_length=24.0,  # 保持默认焦距
-        horizontal_aperture=20.955  # 保持默认光圈
-    )
+    # Create camera configurations
+    if args.first_person_view:
+        # First-person camera - will be dynamically updated in the simulation
+        camera = PinholeCameraCfg(
+            pos=(0.0, 0.0, 0.0),  # Initial position will be updated in the simulation
+            look_at=(1.0, 0.0, 0.0),  # Initial look_at will be updated in the simulation
+            width=args.camera_width,
+            height=args.camera_height,
+            focal_length=10.0,
+            horizontal_aperture=20.955
+        )
+        log.info(f"Enabling first-person view mode, attaching to link: {args.head_link_name}")
+        log.info(f"Camera offset: {args.camera_offset}, direction: {args.camera_direction}")
+    else:
+        # Standard fixed camera
+        # To make the camera face the ground at a 45-degree angle, the z-coordinate (height) of the camera's position
+        # must be equal to the distance between the camera and the look_at point in the xy-plane.
+        # Example: pos=(3, 0, 3) and look_at=(0, 0, 0)
+        # Height = pos.z - look_at.z = 3 - 0 = 3
+        # XY-plane distance = sqrt((pos.x-look_at.x)^2 + (pos.y-look_at.y)^2) = sqrt((3-0)^2 + (0-0)^2) = 3
+        # Since Height == XY-plane distance, the angle with the horizontal plane is 45 degrees.
+        #
+        # You can modify the pos value below, just keep the z value equal to the xy distance to maintain the angle.
+        # For example, let's move the camera a bit closer while keeping the 45-degree angle:
+        camera_pos = (2.5, 0.0, 2.5)
+        look_at_pos = (-3.0, 0.0, 0.0)
+        
+        camera = PinholeCameraCfg(
+            pos=camera_pos, 
+            look_at=look_at_pos,
+            width=args.camera_width,
+            height=args.camera_height,
+            focal_length=10.0,
+            horizontal_aperture=20.955
+        )
     
-    # 显示图片质量设置信息
-    log.info(f"图片质量设置:")
-    log.info(f"  相机分辨率: {args.camera_width}x{args.camera_height}")
-    log.info(f"  渲染模式: {args.render_mode}")
-    log.info(f"  保存质量: {args.save_quality}/100")
+    # Display image quality settings
+    log.info(f"Image Quality Settings:")
+    log.info(f"  Camera Resolution: {args.camera_width}x{args.camera_height}")
+    log.info(f"  Render Mode: {args.render_mode}")
+    log.info(f"  Save Quality: {args.save_quality}/100")
     
     scenario = ScenarioCfg(
         task=args.task,
@@ -259,7 +396,7 @@ def main():
         scene=args.scene,
         cameras=[camera],
         random=args.random,
-        render=render_cfg,  # 使用高质量渲染配置
+        render=render_cfg,  # Use high-quality render config
         sim=args.sim,
         renderer=args.renderer,
         num_envs=args.num_envs,
