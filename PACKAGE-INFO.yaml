@@ -1,0 +1,8 @@
+Package : Industrial_NVD
+Version : 10012
+Maintainers : ['Beau Perschall']
+Description : Archvis Industrial warehouse and entourage content
+SWIPAT NvBug : http://nvbugs/0000000
+Repository : https://gitlab/omniverse/scenes-templates.git
+Branch : main
+Commit: 744960a41e6c83864c88879f402bd1ff1622fe51

@@ -1,0 +1,10 @@
+roboverse_data
+roboverse_demo
+data
+data_isaaclab
+data_policy
+info
+outputs
+tmp
+wandb
+!metasim
