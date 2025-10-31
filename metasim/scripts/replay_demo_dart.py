@@ -108,9 +108,9 @@ class Args:
     # DART integration options
     use_dart: bool = True
     dart_prefix_frames: int = 2
-    motion_pkl_path: str = "motion_data/test1_zero_male/walk_stand1_v2_enhanced.pkl"
-    denoiser_checkpoint: str = 'DART/mld_denoiser/mld_hml3d_retarget_collected/checkpoint_200000.pt'
-    text_prompt: str = 'walks in the scene'
+    motion_pkl_path: str = "motion_data/test/walk_stand9_v2_enhanced.pkl"
+    denoiser_checkpoint: str = 'DART/mld_denoiser/mld_hml3d_retarget_w_dofrot/checkpoint_300000.pt'
+    text_prompt: str = 'a person is walking forward'
     guidance_param: float = 5.0
     respacing: str = ''
     replan_freq: int = 10  # frames @ 20fps = 0.5s
@@ -195,8 +195,7 @@ class DARTMotionGenerator:
         # Load dataset for normalization/denormalization
         cfg_path = str(Path(proj_root) / 'DART' / vae_args.data_args.cfg_path.lstrip('./'))
         dataset_path = str(Path(proj_root) / 'DART' / vae_args.data_args.data_dir.lstrip('./'))
-        # Use motion_pkl_path from args instead of hardcoded path
-        sample_stand_path = str(Path(proj_root) / args.motion_pkl_path)
+        sample_stand_path = str(Path(proj_root) / 'motion_data' / 'test' / 'walk_stand9_v2_enhanced.pkl')
         self.dataset = SinglePrimitiveDatasetRetarget(
             cfg_path=cfg_path,
             dataset_path=dataset_path,
@@ -719,52 +718,6 @@ class EnhancedObsSaver:
             )
 
 
-def extract_motion_from_pkl(pkl_data: dict) -> dict:
-    """Extract motion data from new nested pkl format.
-    
-    Handles both formats:
-    - Old format: flat dict with motion keys at root level
-    - New format: nested dict with structure:
-        {
-            '<dynamic_name>': {
-                'motion': {
-                    'gender': ...,
-                    'betas': ...,
-                    'root_pos_relative': ...,
-                    'root_rot_relative': ...,
-                    'dof_pos': ...,
-                    'root_vel': ...,
-                    'root_ang_vel': ...,
-                    'dof_vel': ...,
-                    'local_body_pos': ...,
-                    'rgb_images': ...
-                }
-            }
-        }
-    
-    Args:
-        pkl_data: Loaded pkl data (possibly nested)
-        
-    Returns:
-        Flat motion dict with all motion keys at root level
-    """
-    # Check if it's the new nested format
-    if len(pkl_data) == 1:
-        # Get the only key (dynamic name)
-        root_key = list(pkl_data.keys())[0]
-        
-        # Check if it has 'motion' sub-key
-        if isinstance(pkl_data[root_key], dict) and 'motion' in pkl_data[root_key]:
-            log.info(f"✅ Detected new pkl format with root key: '{root_key}'")
-            motion_data = pkl_data[root_key]['motion']
-            log.info(f"   Motion keys: {list(motion_data.keys())}")
-            return motion_data
-    
-    # If not nested format, assume it's old format (flat dict)
-    log.info("Detected old pkl format (flat dict)")
-    return pkl_data
-
-
 def load_motion_data(config_path: str) -> dict:
     """Load motion data from config file."""
     with open(config_path, 'r') as f:
@@ -772,19 +725,12 @@ def load_motion_data(config_path: str) -> dict:
     return config
 
 
-def save_enhanced_pkl(output_path: str, motion_data: dict, resized_images, 
+def save_enhanced_pkl(output_path: str, motion_data: dict, resized_images: list, 
                       robot_urdf: str, device="cpu"):
-    """Save enhanced pkl with additional computed data.
-    
-    Args:
-        resized_images: Can be list or numpy array of RGB images
-    """
+    """Save enhanced pkl with additional computed data."""
     log.info("Creating enhanced pkl file...")
     
     out = motion_data.copy()
-    
-    # Get frame count from motion data
-    T = len(out.get('root_pos', []))
     
     # Compute dof_rot if motion_tools is available
     if robot_urdf and motion_tools_path.exists():
@@ -832,18 +778,12 @@ def save_enhanced_pkl(output_path: str, motion_data: dict, resized_images,
         except Exception as e:
             log.error(f"Error computing dof_rot: {e}")
 
-    # Handle rgb_images (can be list or numpy array)
-    if resized_images is not None:
-        img_count = len(resized_images) if isinstance(resized_images, (list, np.ndarray)) else 0
-        if img_count > 0:
-            if img_count != T:
-                log.warning(f"Image count ({img_count}) != frame count ({T})")
-                if isinstance(resized_images, list):
-                    resized_images = resized_images[:min(T, img_count)]
-                else:  # numpy array
-                    resized_images = resized_images[:min(T, img_count)]
-            out["rgb_images"] = resized_images
-            log.info(f"Added {img_count} RGB images (type: {type(resized_images).__name__})")
+    if len(resized_images) > 0:
+        if len(resized_images) != T:
+            log.warning(f"Image count ({len(resized_images)}) != frame count ({T})")
+            resized_images = resized_images[:min(T, len(resized_images))]
+        out["rgb_images"] = resized_images
+        log.info(f"Added {len(resized_images)} resized RGB images")
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
     log.info(f"Saving enhanced data to {output_path}...")
@@ -884,40 +824,13 @@ def replay_single_trajectory_with_dart(env, scenario, traj_path, args, obs_saver
     toc = time.time()
     log.trace(f"Time to load data: {toc - tic:.2f}s")
 
-    # Load pkl data for rgb_images (and DART if enabled)
-    full_motion_data = None
-    if args.motion_pkl_path and os.path.exists(args.motion_pkl_path):
-        log.info(f"Loading motion data from {args.motion_pkl_path}")
+    # Initialize DART if enabled
+    if dart_generator is not None and args.dart_prefix_frames > 0:
+        log.info(f"Loading motion data from {args.motion_pkl_path} for DART initialization")
         
         # Load complete motion data
         with open(args.motion_pkl_path, 'rb') as f:
-            raw_pkl_data = pickle.load(f)
-        
-        # ✅ Extract motion data from nested format (handles both old and new formats)
-        full_motion_data = extract_motion_from_pkl(raw_pkl_data)
-        
-        # Check if rgb_images exist in pkl
-        if 'rgb_images' in full_motion_data:
-            rgb_imgs = full_motion_data['rgb_images']
-            if isinstance(rgb_imgs, list):
-                log.info(f"Found rgb_images in pkl (list) with {len(rgb_imgs)} frames")
-                # Convert list to numpy array if needed
-                if len(rgb_imgs) > 0:
-                    if isinstance(rgb_imgs[0], np.ndarray):
-                        log.info(f"  First frame shape: {rgb_imgs[0].shape}")
-                    else:
-                        log.info(f"  First frame type: {type(rgb_imgs[0])}")
-            elif hasattr(rgb_imgs, 'shape'):
-                log.info(f"Found rgb_images in pkl (array) with shape: {rgb_imgs.shape}")
-            else:
-                log.info(f"Found rgb_images in pkl with type: {type(rgb_imgs)}")
-            log.info("Will use pkl rgb_images instead of sapien-rendered images")
-        else:
-            log.warning("No rgb_images found in pkl, will use sapien-rendered images")
-    
-    # Initialize DART if enabled
-    if dart_generator is not None and args.dart_prefix_frames > 0 and full_motion_data is not None:
-        log.info(f"Initializing DART with prefix frames")
+            full_motion_data = pickle.load(f)
         
         # Extract prefix frames
         prefix_frames = min(args.dart_prefix_frames, len(full_motion_data['dof_pos']))
@@ -1303,24 +1216,10 @@ def main():
         # Save enhanced pkl if requested
         if args.save_enhanced_pkl_dir and motion_data is not None:
             output_pkl_path = os.path.join(args.save_enhanced_pkl_dir, f"{traj_basename}_enhanced.pkl")
-            # Use rgb_images from pkl if available, otherwise use sapien-rendered images
-            rgb_images_to_save = None
-            if full_motion_data is not None and 'rgb_images' in full_motion_data:
-                rgb_images_to_save = full_motion_data['rgb_images']
-                if isinstance(rgb_images_to_save, list):
-                    log.info(f"Using rgb_images from pkl for saving: {len(rgb_images_to_save)} frames (list)")
-                elif hasattr(rgb_images_to_save, 'shape'):
-                    log.info(f"Using rgb_images from pkl for saving: {rgb_images_to_save.shape}")
-                else:
-                    log.info(f"Using rgb_images from pkl for saving: type {type(rgb_images_to_save)}")
-            else:
-                rgb_images_to_save = obs_saver.resized_images
-                log.info(f"Using sapien-rendered images for saving: {len(rgb_images_to_save)} frames")
-            
             save_enhanced_pkl(
                 output_pkl_path, 
                 motion_data, 
-                rgb_images_to_save,
+                obs_saver.resized_images,
                 args.robot_urdf if args.robot_urdf else "",
                 device="cpu"
             )
