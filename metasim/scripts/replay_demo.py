@@ -100,16 +100,20 @@ class Args:
     perturb_torque_range: tuple[float, float] = (0.5, 2.0)  # Not used in kinematic mode
     perturb_action_noise: float = 0.01  # Joint position noise scale (radians)
     perturb_interval: int = 1  # Apply perturbation every N steps (1 = every step)
-    perturb_strength: float = 1.0  # Perturbation strength multiplier (1.0 = default, higher = stronger)
+    
+    # Separate control for position and rotation perturbations
+    perturb_position_strength: float = 1.0  # Position perturbation multiplier (1.0 = default, ±15cm max)
+    perturb_rotation_strength: float = 0.3  # Rotation perturbation multiplier (0.3 = 30% of position, smaller by default)
+    perturb_damping: float = 0.92  # Velocity damping (0.92 = default, lower=faster decay, higher=longer sliding)
 
     def __post_init__(self):
         log.info(f"Args: {self}")
         if self.enable_perturbation:
             log.info(f"🌊 Perturbation ENABLED (Spring-Damper Sliding Mode):")
             log.info(f"  - Type: Continuous random forces + restoring spring")
-            log.info(f"  - Strength: {self.perturb_strength}x (default=1.0)")
-            log.info(f"  - Max drift: ±{0.15*self.perturb_strength:.2f}m position, ±{17*self.perturb_strength:.1f}° rotation")
-            log.info(f"  - Damping: 0.92 (friction effect)")
+            log.info(f"  - Position strength: {self.perturb_position_strength}x (max drift: ±{0.15*self.perturb_position_strength:.2f}m)")
+            log.info(f"  - Rotation strength: {self.perturb_rotation_strength}x (max drift: ±{17*self.perturb_rotation_strength:.1f}°)")
+            log.info(f"  - Damping: {self.perturb_damping:.2f} (friction, lower=faster stop, higher=longer slide)")
             log.info(f"  - Restoring: 0.15 (spring pulling back to trajectory)")
             log.info(f"  - Joint noise: {self.perturb_action_noise} rad")
             log.info(f"  - Effect: Slides/drifts in middle, returns to target at end")
@@ -178,18 +182,20 @@ def perturb_states(states, args, step: int, num_envs: int):
         # 1. Random perturbation forces (like wind/ice)
         # 2. Restoring force (like spring) pulling back to original trajectory
         # 3. Result: slides in middle but returns to target at end
+        # 4. Separate control for position and rotation perturbations
         
-        # Add random perturbation forces (scaled by strength)
+        # Add random perturbation forces (scaled by SEPARATE position/rotation strength)
         random_force = np.array([
-            random.gauss(0, 0.001 * args.perturb_strength),  # Random push
-            random.gauss(0, 0.001 * args.perturb_strength),
-            random.gauss(0, 0.0003 * args.perturb_strength)  # Less vertical
+            random.gauss(0, 0.001 * args.perturb_position_strength),  # Random push in X
+            random.gauss(0, 0.001 * args.perturb_position_strength),  # Random push in Y
+            random.gauss(0, 0.0003 * args.perturb_position_strength)  # Less vertical (Z)
         ])
         
+        # Rotation perturbation uses SEPARATE strength (typically smaller)
         random_torque = np.array([
-            random.gauss(0, 0.002 * args.perturb_strength),  # Random rotation
-            random.gauss(0, 0.002 * args.perturb_strength),
-            random.gauss(0, 0.001 * args.perturb_strength)
+            random.gauss(0, 0.002 * args.perturb_rotation_strength),  # Random rotation around X
+            random.gauss(0, 0.002 * args.perturb_rotation_strength),  # Random rotation around Y
+            random.gauss(0, 0.001 * args.perturb_rotation_strength)   # Random rotation around Z
         ])
         
         # Add restoring force (spring-like) that pulls back to offset=0
@@ -202,18 +208,18 @@ def perturb_states(states, args, step: int, num_envs: int):
         _perturbation_state['velocity'][env_id] += random_force + restoring_force
         _perturbation_state['ang_velocity'][env_id] += random_torque + restoring_torque
         
-        # Apply damping (friction) - gradually reduce velocity
-        damping = 0.92
-        _perturbation_state['velocity'][env_id] *= damping
-        _perturbation_state['ang_velocity'][env_id] *= damping
+        # Apply damping (friction) - gradually reduce velocity (user-controllable)
+        _perturbation_state['velocity'][env_id] *= args.perturb_damping
+        _perturbation_state['ang_velocity'][env_id] *= args.perturb_damping
         
         # Integrate velocity to get position offset (sliding effect)
         _perturbation_state['pos_offset'][env_id] += _perturbation_state['velocity'][env_id]
         _perturbation_state['rot_offset_euler'][env_id] += _perturbation_state['ang_velocity'][env_id]
         
         # Soft clamp to allow larger movement (but still bounded)
-        max_pos_offset = 0.15 * args.perturb_strength  # Scale with strength
-        max_rot_offset = 0.3 * args.perturb_strength   # ~17 degrees max
+        # Position and rotation have INDEPENDENT max offsets now
+        max_pos_offset = 0.15 * args.perturb_position_strength  # Scale with position strength
+        max_rot_offset = 0.3 * args.perturb_rotation_strength   # Scale with rotation strength (~17°)
         _perturbation_state['pos_offset'][env_id] = np.clip(
             _perturbation_state['pos_offset'][env_id], -max_pos_offset, max_pos_offset
         )
