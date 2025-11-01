@@ -74,7 +74,7 @@ class Args:
 
     save_image_dir: str | None = "tmp"
     save_video_path: str | None = None
-    stop_on_runout: bool = False
+    stop_on_runout: bool = True
     
     camera_width: int = 1920
     camera_height: int = 1080
@@ -105,6 +105,7 @@ class Args:
     perturb_position_strength: float = 1.0  # Position perturbation multiplier (1.0 = default, ±15cm max)
     perturb_rotation_strength: float = 0.3  # Rotation perturbation multiplier (0.3 = 30% of position, smaller by default)
     perturb_damping: float = 0.92  # Velocity damping (0.92 = default, lower=faster decay, higher=longer sliding)
+    save_trajectory_plot: str | None = None  # Path to save trajectory comparison plot (original vs perturbed)
 
     def __post_init__(self):
         log.info(f"Args: {self}")
@@ -117,6 +118,8 @@ class Args:
             log.info(f"  - Restoring: 0.15 (spring pulling back to trajectory)")
             log.info(f"  - Joint noise: {self.perturb_action_noise} rad")
             log.info(f"  - Effect: Slides/drifts in middle, returns to target at end")
+            if self.save_trajectory_plot:
+                log.info(f"  - 📊 Trajectory plot will be saved to: {self.save_trajectory_plot}")
 
 
 args = tyro.cli(Args)
@@ -144,14 +147,24 @@ def get_runout(all_actions, action_idx: int):
 # Global perturbation state for smooth sliding effect
 _perturbation_state = {}
 
+# Global trajectory recording for visualization
+_trajectory_data = {}
+
 def init_perturbation_state(num_envs):
     """Initialize accumulated perturbation state for each environment."""
-    global _perturbation_state
+    global _perturbation_state, _trajectory_data
     _perturbation_state = {
         'pos_offset': [np.zeros(3) for _ in range(num_envs)],
         'rot_offset_euler': [np.zeros(3) for _ in range(num_envs)],
         'velocity': [np.zeros(3) for _ in range(num_envs)],
         'ang_velocity': [np.zeros(3) for _ in range(num_envs)],
+    }
+    # Initialize trajectory recording
+    _trajectory_data = {
+        'original_positions': [[] for _ in range(num_envs)],  # Original trajectory
+        'perturbed_positions': [[] for _ in range(num_envs)],  # Perturbed trajectory
+        'original_rotations': [[] for _ in range(num_envs)],   # Original euler angles
+        'perturbed_rotations': [[] for _ in range(num_envs)],  # Perturbed euler angles
     }
 
 def perturb_states(states, args, step: int, num_envs: int):
@@ -233,7 +246,17 @@ def perturb_states(states, args, step: int, num_envs: int):
                 # Apply position offset (sliding)
                 if "pos" in robot_data:
                     original_pos = robot_data["pos"]
-                    perturbed_state["robots"][robot_name]["pos"] = original_pos + _perturbation_state['pos_offset'][env_id]
+                    perturbed_pos = original_pos + _perturbation_state['pos_offset'][env_id]
+                    perturbed_state["robots"][robot_name]["pos"] = perturbed_pos
+                    
+                    # Record trajectory for visualization
+                    global _trajectory_data
+                    if _trajectory_data:
+                        # Handle both numpy arrays and torch tensors
+                        orig_pos_np = original_pos.cpu().numpy() if hasattr(original_pos, 'cpu') else np.array(original_pos)
+                        pert_pos_np = perturbed_pos.cpu().numpy() if hasattr(perturbed_pos, 'cpu') else np.array(perturbed_pos)
+                        _trajectory_data['original_positions'][env_id].append(orig_pos_np.copy())
+                        _trajectory_data['perturbed_positions'][env_id].append(pert_pos_np.copy())
                 
                 # Apply rotation offset
                 if "rot" in robot_data:
@@ -252,6 +275,14 @@ def perturb_states(states, args, step: int, num_envs: int):
                         perturbed_rot_xyzw[3], perturbed_rot_xyzw[0], 
                         perturbed_rot_xyzw[1], perturbed_rot_xyzw[2]
                     ])
+                    
+                    # Record rotation for visualization
+                    if _trajectory_data:
+                        original_euler = original_R.as_euler('xyz')
+                        perturbed_euler = perturbed_R.as_euler('xyz')
+                        # Euler angles are already numpy arrays from scipy
+                        _trajectory_data['original_rotations'][env_id].append(np.array(original_euler))
+                        _trajectory_data['perturbed_rotations'][env_id].append(np.array(perturbed_euler))
                 
                 # Add joint noise (small and continuous)
                 if args.perturb_action_noise > 0.0 and "dof_pos" in robot_data:
@@ -271,6 +302,102 @@ def perturb_states(states, args, step: int, num_envs: int):
         perturbed_states.append(perturbed_state)
     
     return perturbed_states
+
+
+def plot_trajectory_comparison(save_path: str):
+    """Plot and save comparison between original and perturbed trajectories."""
+    import matplotlib.pyplot as plt
+    from mpl_toolkits.mplot3d import Axes3D
+    
+    global _trajectory_data
+    
+    if not _trajectory_data or not _trajectory_data['original_positions']:
+        log.warning("No trajectory data to plot!")
+        return
+    
+    num_envs = len(_trajectory_data['original_positions'])
+    
+    # Create figure with subplots
+    fig = plt.figure(figsize=(20, 10))
+    
+    for env_id in range(num_envs):
+        if not _trajectory_data['original_positions'][env_id]:
+            continue
+            
+        original_pos = np.array(_trajectory_data['original_positions'][env_id])
+        perturbed_pos = np.array(_trajectory_data['perturbed_positions'][env_id])
+        
+        # 3D trajectory plot
+        ax1 = fig.add_subplot(2, num_envs, env_id + 1, projection='3d')
+        ax1.plot(original_pos[:, 0], original_pos[:, 1], original_pos[:, 2], 
+                'b-', linewidth=2, label='Original', alpha=0.7)
+        ax1.plot(perturbed_pos[:, 0], perturbed_pos[:, 1], perturbed_pos[:, 2], 
+                'r--', linewidth=2, label='Perturbed', alpha=0.7)
+        ax1.scatter(original_pos[0, 0], original_pos[0, 1], original_pos[0, 2], 
+                   c='green', s=100, marker='o', label='Start')
+        ax1.scatter(original_pos[-1, 0], original_pos[-1, 1], original_pos[-1, 2], 
+                   c='purple', s=100, marker='s', label='End')
+        ax1.set_xlabel('X (m)')
+        ax1.set_ylabel('Y (m)')
+        ax1.set_zlabel('Z (m)')
+        ax1.set_title(f'Env {env_id} - 3D Trajectory')
+        ax1.legend()
+        ax1.grid(True)
+        
+        # 2D top-down view (XY plane)
+        ax2 = fig.add_subplot(2, num_envs, num_envs + env_id + 1)
+        ax2.plot(original_pos[:, 0], original_pos[:, 1], 
+                'b-', linewidth=2, label='Original', alpha=0.7)
+        ax2.plot(perturbed_pos[:, 0], perturbed_pos[:, 1], 
+                'r--', linewidth=2, label='Perturbed', alpha=0.7)
+        ax2.scatter(original_pos[0, 0], original_pos[0, 1], 
+                   c='green', s=100, marker='o', label='Start')
+        ax2.scatter(original_pos[-1, 0], original_pos[-1, 1], 
+                   c='purple', s=100, marker='s', label='End')
+        
+        # Calculate and display statistics
+        max_deviation = np.max(np.linalg.norm(perturbed_pos - original_pos, axis=1))
+        mean_deviation = np.mean(np.linalg.norm(perturbed_pos - original_pos, axis=1))
+        ax2.text(0.02, 0.98, f'Max dev: {max_deviation:.3f}m\nMean dev: {mean_deviation:.3f}m',
+                transform=ax2.transAxes, verticalalignment='top',
+                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
+        
+        ax2.set_xlabel('X (m)')
+        ax2.set_ylabel('Y (m)')
+        ax2.set_title(f'Env {env_id} - Top View (XY)')
+        ax2.legend()
+        ax2.grid(True)
+        ax2.axis('equal')
+    
+    plt.tight_layout()
+    plt.savefig(save_path, dpi=150, bbox_inches='tight')
+    log.info(f"📊 Trajectory comparison plot saved to: {save_path}")
+    plt.close()
+    
+    # Also save rotation comparison if available
+    if _trajectory_data['original_rotations'][0]:
+        fig2, axes = plt.subplots(num_envs, 3, figsize=(15, 5 * num_envs))
+        if num_envs == 1:
+            axes = axes.reshape(1, -1)
+        
+        for env_id in range(num_envs):
+            original_rot = np.array(_trajectory_data['original_rotations'][env_id])
+            perturbed_rot = np.array(_trajectory_data['perturbed_rotations'][env_id])
+            
+            for i, axis_name in enumerate(['Roll (X)', 'Pitch (Y)', 'Yaw (Z)']):
+                axes[env_id, i].plot(original_rot[:, i], 'b-', linewidth=2, label='Original', alpha=0.7)
+                axes[env_id, i].plot(perturbed_rot[:, i], 'r--', linewidth=2, label='Perturbed', alpha=0.7)
+                axes[env_id, i].set_xlabel('Step')
+                axes[env_id, i].set_ylabel('Angle (rad)')
+                axes[env_id, i].set_title(f'Env {env_id} - {axis_name}')
+                axes[env_id, i].legend()
+                axes[env_id, i].grid(True)
+        
+        plt.tight_layout()
+        rotation_save_path = save_path.replace('.png', '_rotation.png')
+        plt.savefig(rotation_save_path, dpi=150, bbox_inches='tight')
+        log.info(f"📊 Rotation comparison plot saved to: {rotation_save_path}")
+        plt.close()
 
 
 def add_action_noise(actions, args):
@@ -702,6 +829,11 @@ def replay_single_trajectory(env, scenario, traj_path, args, obs_saver, motion_d
             break
 
     obs_saver.save()
+    
+    # Plot trajectory comparison if enabled
+    if args.save_trajectory_plot:
+        plot_trajectory_comparison(args.save_trajectory_plot)
+    
     return obs_saver
 
 
