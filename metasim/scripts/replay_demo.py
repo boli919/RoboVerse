@@ -59,6 +59,7 @@ class Args:
     task: str = MISSING
     robot: str = "franka"
     scene: str | None = None
+    scenes: list[str] | None = None  # List of scenes for multi-env parallelization
     render: RenderCfg = RenderCfg()
     random: RandomizationCfg = RandomizationCfg()
 
@@ -91,9 +92,27 @@ class Args:
     save_enhanced_pkl_dir: str | None = None
     robot_urdf: str | None = None
     image_size: int = 224
+    
+    # Perturbation parameters for robustness training (kinematic mode compatible)
+    enable_perturbation: bool = False
+    perturb_prob: float = 0.1  # [DEPRECATED] Not used - perturbation is now continuous (every step)
+    perturb_force_range: tuple[float, float] = (5.0, 20.0)  # Not used in kinematic mode
+    perturb_torque_range: tuple[float, float] = (0.5, 2.0)  # Not used in kinematic mode
+    perturb_action_noise: float = 0.01  # Joint position noise scale (radians)
+    perturb_interval: int = 1  # Apply perturbation every N steps (1 = every step)
+    perturb_strength: float = 1.0  # Perturbation strength multiplier (1.0 = default, higher = stronger)
 
     def __post_init__(self):
         log.info(f"Args: {self}")
+        if self.enable_perturbation:
+            log.info(f"🌊 Perturbation ENABLED (Spring-Damper Sliding Mode):")
+            log.info(f"  - Type: Continuous random forces + restoring spring")
+            log.info(f"  - Strength: {self.perturb_strength}x (default=1.0)")
+            log.info(f"  - Max drift: ±{0.15*self.perturb_strength:.2f}m position, ±{17*self.perturb_strength:.1f}° rotation")
+            log.info(f"  - Damping: 0.92 (friction effect)")
+            log.info(f"  - Restoring: 0.15 (spring pulling back to trajectory)")
+            log.info(f"  - Joint noise: {self.perturb_action_noise} rad")
+            log.info(f"  - Effect: Slides/drifts in middle, returns to target at end")
 
 
 args = tyro.cli(Args)
@@ -116,6 +135,158 @@ def get_states(all_states, action_idx: int, num_envs: int):
 def get_runout(all_actions, action_idx: int):
     runout = all([action_idx >= len(all_actions[i]) for i in range(len(all_actions))])
     return runout
+
+
+# Global perturbation state for smooth sliding effect
+_perturbation_state = {}
+
+def init_perturbation_state(num_envs):
+    """Initialize accumulated perturbation state for each environment."""
+    global _perturbation_state
+    _perturbation_state = {
+        'pos_offset': [np.zeros(3) for _ in range(num_envs)],
+        'rot_offset_euler': [np.zeros(3) for _ in range(num_envs)],
+        'velocity': [np.zeros(3) for _ in range(num_envs)],
+        'ang_velocity': [np.zeros(3) for _ in range(num_envs)],
+    }
+
+def perturb_states(states, args, step: int, num_envs: int):
+    """Apply smooth continuous perturbations (sliding/drifting) to kinematic states.
+    
+    This creates a smooth sliding effect instead of instant jumps.
+    """
+    if not args.enable_perturbation:
+        return states
+    
+    import random
+    from copy import deepcopy
+    from scipy.spatial.transform import Rotation as R
+    
+    global _perturbation_state
+    
+    # Initialize if first time
+    if not _perturbation_state:
+        init_perturbation_state(num_envs)
+    
+    perturbed_states = []
+    
+    for env_id, state in enumerate(states):
+        # Create a copy to modify
+        perturbed_state = deepcopy(state)
+        
+        # ========== NEW STRATEGY: Add restoring force to keep start/end same ==========
+        # 1. Random perturbation forces (like wind/ice)
+        # 2. Restoring force (like spring) pulling back to original trajectory
+        # 3. Result: slides in middle but returns to target at end
+        
+        # Add random perturbation forces (scaled by strength)
+        random_force = np.array([
+            random.gauss(0, 0.001 * args.perturb_strength),  # Random push
+            random.gauss(0, 0.001 * args.perturb_strength),
+            random.gauss(0, 0.0003 * args.perturb_strength)  # Less vertical
+        ])
+        
+        random_torque = np.array([
+            random.gauss(0, 0.002 * args.perturb_strength),  # Random rotation
+            random.gauss(0, 0.002 * args.perturb_strength),
+            random.gauss(0, 0.001 * args.perturb_strength)
+        ])
+        
+        # Add restoring force (spring-like) that pulls back to offset=0
+        # This ensures the robot returns to original trajectory
+        restoring_strength = 0.15  # Spring constant
+        restoring_force = -restoring_strength * _perturbation_state['pos_offset'][env_id]
+        restoring_torque = -restoring_strength * _perturbation_state['rot_offset_euler'][env_id]
+        
+        # Net force = random perturbation + restoring force
+        _perturbation_state['velocity'][env_id] += random_force + restoring_force
+        _perturbation_state['ang_velocity'][env_id] += random_torque + restoring_torque
+        
+        # Apply damping (friction) - gradually reduce velocity
+        damping = 0.92
+        _perturbation_state['velocity'][env_id] *= damping
+        _perturbation_state['ang_velocity'][env_id] *= damping
+        
+        # Integrate velocity to get position offset (sliding effect)
+        _perturbation_state['pos_offset'][env_id] += _perturbation_state['velocity'][env_id]
+        _perturbation_state['rot_offset_euler'][env_id] += _perturbation_state['ang_velocity'][env_id]
+        
+        # Soft clamp to allow larger movement (but still bounded)
+        max_pos_offset = 0.15 * args.perturb_strength  # Scale with strength
+        max_rot_offset = 0.3 * args.perturb_strength   # ~17 degrees max
+        _perturbation_state['pos_offset'][env_id] = np.clip(
+            _perturbation_state['pos_offset'][env_id], -max_pos_offset, max_pos_offset
+        )
+        _perturbation_state['rot_offset_euler'][env_id] = np.clip(
+            _perturbation_state['rot_offset_euler'][env_id], -max_rot_offset, max_rot_offset
+        )
+        
+        # Apply accumulated offsets to robot state
+        if "robots" in perturbed_state:
+            for robot_name, robot_data in perturbed_state["robots"].items():
+                # Apply position offset (sliding)
+                if "pos" in robot_data:
+                    original_pos = robot_data["pos"]
+                    perturbed_state["robots"][robot_name]["pos"] = original_pos + _perturbation_state['pos_offset'][env_id]
+                
+                # Apply rotation offset
+                if "rot" in robot_data:
+                    original_rot = robot_data["rot"]  # [w,x,y,z] format
+                    # Convert to [x,y,z,w] for scipy
+                    original_rot_xyzw = np.array([original_rot[1], original_rot[2], original_rot[3], original_rot[0]])
+                    original_R = R.from_quat(original_rot_xyzw)
+                    
+                    # Apply accumulated rotation offset
+                    offset_R = R.from_euler('xyz', _perturbation_state['rot_offset_euler'][env_id])
+                    perturbed_R = offset_R * original_R
+                    perturbed_rot_xyzw = perturbed_R.as_quat()
+                    
+                    # Convert back to [w,x,y,z]
+                    perturbed_state["robots"][robot_name]["rot"] = np.array([
+                        perturbed_rot_xyzw[3], perturbed_rot_xyzw[0], 
+                        perturbed_rot_xyzw[1], perturbed_rot_xyzw[2]
+                    ])
+                
+                # Add joint noise (small and continuous)
+                if args.perturb_action_noise > 0.0 and "dof_pos" in robot_data:
+                    for joint_name, pos in robot_data["dof_pos"].items():
+                        noise = random.gauss(0, args.perturb_action_noise * 0.1)  # Smaller for smoothness
+                        perturbed_state["robots"][robot_name]["dof_pos"][joint_name] = pos + noise
+        
+        # Log every 30 steps to avoid spam
+        pos_offset_norm = np.linalg.norm(_perturbation_state['pos_offset'][env_id])
+        if step % 30 == 0 and pos_offset_norm > 0.001:
+            pos_off = _perturbation_state['pos_offset'][env_id]
+            vel = _perturbation_state['velocity'][env_id]
+            log.info(f"🌊 Env {env_id} sliding continuously: "
+                    f"pos_offset=[{pos_off[0]:.3f},{pos_off[1]:.3f},{pos_off[2]:.3f}]m (norm={pos_offset_norm:.3f}), "
+                    f"velocity=[{vel[0]:.4f},{vel[1]:.4f},{vel[2]:.4f}]m/s")
+        
+        perturbed_states.append(perturbed_state)
+    
+    return perturbed_states
+
+
+def add_action_noise(actions, args):
+    """Add noise to actions for robustness."""
+    if args.perturb_action_noise <= 0.0:
+        return actions
+    
+    import random
+    noisy_actions = []
+    for action in actions:
+        if action and "dof_pos_target" in action:
+            noisy_action = action.copy()
+            noisy_dof_pos = {}
+            for joint_name, pos in action["dof_pos_target"].items():
+                noise = random.gauss(0, args.perturb_action_noise)
+                noisy_dof_pos[joint_name] = pos + noise
+            noisy_action["dof_pos_target"] = noisy_dof_pos
+            noisy_actions.append(noisy_action)
+        else:
+            noisy_actions.append(action)
+    
+    return noisy_actions
 
 
 def quat_xyzw_to_rotmat(q: torch.Tensor) -> torch.Tensor:
@@ -470,6 +641,10 @@ def replay_single_trajectory(env, scenario, traj_path, args, obs_saver, motion_d
             if all_states is None:
                 raise ValueError("All states are None, please check the trajectory file")
             states = get_states(all_states, step, args.num_envs)
+            
+            # Apply kinematic perturbations (for object_states mode)
+            states = perturb_states(states, args, step, args.num_envs)
+            
             env.handler.set_states(states)
             
             if args.first_person_view:
@@ -486,6 +661,9 @@ def replay_single_trajectory(env, scenario, traj_path, args, obs_saver, motion_d
 
         else:
             actions = get_actions(all_actions, step, args.num_envs, scenario.robots[0])
+            
+            # Add action noise if enabled
+            actions = add_action_noise(actions, args)
             
             log.info(f"Step {step}: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
             
@@ -576,6 +754,7 @@ def main():
         task=args.task,
         robots=[args.robot],
         scene=args.scene,
+        scenes=args.scenes,
         cameras=[camera],
         random=args.random,
         render=render_cfg,

@@ -32,7 +32,9 @@ class ScenarioCfg:
     """None means no task specified"""
     robots: list[BaseRobotCfg] = []
     scene: SceneCfg | None = None
-    """None means no scene"""
+    """None means no scene. If scenes is provided, this will be ignored in parallel mode."""
+    scenes: list[SceneCfg] | None = None
+    """List of scenes for multi-env parallelization. Each env will get a scene from this list (cycling if needed)."""
     lights: list[BaseLightCfg] = [DistantLightCfg()]
     objects: list[BaseObjCfg] = []
     cameras: list[BaseCameraCfg] = []
@@ -61,7 +63,7 @@ class ScenarioCfg:
     def __post_init__(self):
         """Post-initialization configuration."""
         ### Align configurations
-        if (self.random.scene or self.scene is not None) and self.try_add_table:
+        if (self.random.scene or self.scene is not None or self.scenes is not None) and self.try_add_table:
             log.warning("try_add_table is set to False because scene randomization is enabled or a scene is specified")
             self.try_add_table = False
 
@@ -82,6 +84,10 @@ class ScenarioCfg:
                 self.robots[i] = get_robot(robot)
         if isinstance(self.scene, str):
             self.scene = get_scene(self.scene)
+        if self.scenes is not None:
+            for i, scene in enumerate(self.scenes):
+                if isinstance(scene, str):
+                    self.scenes[i] = get_scene(scene)
 
         ### Simulator parameters overvide by task
         self.sim_params = self.task.sim_params if self.task is not None else self.sim_params

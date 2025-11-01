@@ -108,13 +108,13 @@ class Args:
     # DART integration options
     use_dart: bool = True
     dart_prefix_frames: int = 2
-    motion_pkl_path: str = "motion_data/test1_zero_male/walk_stand1_v2_enhanced.pkl"
+    motion_pkl_path: str = "motion_data/test1_zero_male/walk_stand_v2_enhanced.pkl"
     denoiser_checkpoint: str = 'DART/mld_denoiser/mld_hml3d_retarget_collected/checkpoint_200000.pt'
     text_prompt: str = 'walks in the scene'
     guidance_param: float = 5.0
     respacing: str = ''
-    replan_freq: int = 10  # frames @ 20fps = 0.5s
-    replan_chunk_size: int = 25  # frames @ 20fps = 1.25s
+    replan_freq: int = 8  # frames @ 20fps = 0.5s
+    replan_chunk_size: int = 10  # frames @ 20fps = 1.25s
     debug_print: bool = False
 
     def __post_init__(self):

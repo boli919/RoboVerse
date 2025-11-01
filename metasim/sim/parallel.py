@@ -99,8 +99,6 @@ def ParallelSimWrapper(base_cls: type[BaseSimHandler]) -> type[BaseSimHandler]:
                 return super().__new__(cls)
 
         def __init__(self, scenario: ScenarioCfg):
-            sub_scenario = deepcopy(scenario)
-            sub_scenario.num_envs = 1
             super().__init__(scenario)
 
             self.waiting = False
@@ -118,6 +116,17 @@ def ParallelSimWrapper(base_cls: type[BaseSimHandler]) -> type[BaseSimHandler]:
             self.remotes, self.work_remotes = zip(*[ctx.Pipe() for _ in range(self.num_envs)])
             self.processes = []
             for rank in range(self.num_envs):
+                # Create a sub_scenario for each worker
+                sub_scenario = deepcopy(scenario)
+                sub_scenario.num_envs = 1
+                
+                # Assign scene to this worker based on rank
+                if scenario.scenes is not None and len(scenario.scenes) > 0:
+                    # Use modulo to cycle through scenes if there are fewer scenes than envs
+                    scene_idx = rank % len(scenario.scenes)
+                    sub_scenario.scene = scenario.scenes[scene_idx]
+                    log.info(f"Worker {rank}: assigned scene index {scene_idx}")
+                
                 work_remote = self.work_remotes[rank]
                 remote = self.remotes[rank]
                 args = (rank, work_remote, remote, self.error_queue, partial(base_cls, sub_scenario))
