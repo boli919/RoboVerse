@@ -15,7 +15,7 @@ if motion_tools_path.exists():
     sys.path.insert(0, str(project_root))
 
 try:
-    import isaacgym
+    import isaacgym  # noqa: F401
 except ImportError:
     pass
 
@@ -30,6 +30,7 @@ from torchvision.utils import make_grid
 from tyro import MISSING
 from PIL import Image
 import torch
+import torchvision.transforms as T  # for clip transforms
 
 from metasim.cfg.randomization import RandomizationCfg
 from metasim.cfg.render import RenderCfg
@@ -59,12 +60,29 @@ class Args:
     task: str = MISSING
     robot: str = "franka"
     scene: str | None = None
-    scenes: list[str] | None = None  # List of scenes for multi-env parallelization
+    scenes: list[str] | None = None
     render: RenderCfg = RenderCfg()
     random: RandomizationCfg = RandomizationCfg()
 
-    sim: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "sapien2", "sapien3", "mujoco", "mjx"] = "sapien3"
-    renderer: Literal["isaaclab", "isaacgym", "genesis", "pybullet", "mujoco", "sapien2", "sapien3"] | None = None
+    sim: Literal[
+        "isaaclab",
+        "isaacgym",
+        "genesis",
+        "pybullet",
+        "sapien2",
+        "sapien3",
+        "mujoco",
+        "mjx",
+    ] = "sapien3"
+    renderer: Literal[
+        "isaaclab",
+        "isaacgym",
+        "genesis",
+        "pybullet",
+        "mujoco",
+        "sapien2",
+        "sapien3",
+    ] | None = None
 
     num_envs: int = 1
     try_add_table: bool = True
@@ -75,51 +93,45 @@ class Args:
     save_image_dir: str | None = "tmp"
     save_video_path: str | None = None
     stop_on_runout: bool = True
-    
+
     camera_width: int = 1920
     camera_height: int = 1080
     render_mode: Literal["rasterization", "raytracing", "pathtracing"] = "pathtracing"
     save_quality: int = 95
-    
+
     robot_height_offset: float = 0.0
-    
+
     first_person_view: bool = False
     head_link_name: str = "head_link"
     camera_offset: tuple[float, float, float] = (0.1, 0.0, 0.5)
     camera_direction: tuple[float, float, float] = (1.0, 0.0, -0.577)
-    
+
     motion_config: str | None = None
     save_enhanced_pkl_dir: str | None = None
     robot_urdf: str | None = None
-    image_size: int = 224
-    
-    # Perturbation parameters for robustness training (kinematic mode compatible)
+    image_size: int = 224  # 你之前存 pkl 用的 224×224
+
+    # perturbation 相关
     enable_perturbation: bool = False
-    perturb_prob: float = 0.1  # [DEPRECATED] Not used - perturbation is now continuous (every step)
-    perturb_force_range: tuple[float, float] = (5.0, 20.0)  # Not used in kinematic mode
-    perturb_torque_range: tuple[float, float] = (0.5, 2.0)  # Not used in kinematic mode
-    perturb_action_noise: float = 0.01  # Joint position noise scale (radians)
-    perturb_interval: int = 1  # Apply perturbation every N steps (1 = every step)
-    
-    # Separate control for position and rotation perturbations
-    perturb_position_strength: float = 1.0  # Position perturbation multiplier (1.0 = default, ±15cm max)
-    perturb_rotation_strength: float = 0.3  # Rotation perturbation multiplier (0.3 = 30% of position, smaller by default)
-    perturb_damping: float = 0.92  # Velocity damping (0.92 = default, lower=faster decay, higher=longer sliding)
-    save_trajectory_plot: str | None = None  # Path to save trajectory comparison plot (original vs perturbed)
+    perturb_prob: float = 0.1
+    perturb_force_range: tuple[float, float] = (5.0, 20.0)
+    perturb_torque_range: tuple[float, float] = (0.5, 2.0)
+    perturb_action_noise: float = 0.01
+    perturb_interval: int = 1
+    perturb_position_strength: float = 1.0
+    perturb_rotation_strength: float = 0.3
+    perturb_damping: float = 0.92
+    save_trajectory_plot: str | None = None
+
+    # CLIP
+    use_clip: bool = False
+    clip_device: str = "cuda"
+    clip_model_name: str = "ViT-B/32"
 
     def __post_init__(self):
         log.info(f"Args: {self}")
         if self.enable_perturbation:
-            log.info(f"🌊 Perturbation ENABLED (Spring-Damper Sliding Mode):")
-            log.info(f"  - Type: Continuous random forces + restoring spring")
-            log.info(f"  - Position strength: {self.perturb_position_strength}x (max drift: ±{0.15*self.perturb_position_strength:.2f}m)")
-            log.info(f"  - Rotation strength: {self.perturb_rotation_strength}x (max drift: ±{17*self.perturb_rotation_strength:.1f}°)")
-            log.info(f"  - Damping: {self.perturb_damping:.2f} (friction, lower=faster stop, higher=longer slide)")
-            log.info(f"  - Restoring: 0.15 (spring pulling back to trajectory)")
-            log.info(f"  - Joint noise: {self.perturb_action_noise} rad")
-            log.info(f"  - Effect: Slides/drifts in middle, returns to target at end")
-            if self.save_trajectory_plot:
-                log.info(f"  - 📊 Trajectory plot will be saved to: {self.save_trajectory_plot}")
+            log.info("🌊 perturbation enabled")
 
 
 args = tyro.cli(Args)
@@ -127,306 +139,200 @@ args = tyro.cli(Args)
 
 def get_actions(all_actions, action_idx: int, num_envs: int, robot: BaseRobotCfg):
     envs_actions = all_actions[:num_envs]
-    actions = [
-        env_actions[action_idx] if action_idx < len(env_actions) else env_actions[-1] for env_actions in envs_actions
+    return [
+        env_actions[action_idx] if action_idx < len(env_actions) else env_actions[-1]
+        for env_actions in envs_actions
     ]
-    return actions
 
 
 def get_states(all_states, action_idx: int, num_envs: int):
     envs_states = all_states[:num_envs]
-    states = [env_states[action_idx] if action_idx < len(env_states) else env_states[-1] for env_states in envs_states]
-    return states
+    return [
+        env_states[action_idx] if action_idx < len(env_states) else env_states[-1]
+        for env_states in envs_states
+    ]
 
 
 def get_runout(all_actions, action_idx: int):
-    runout = all([action_idx >= len(all_actions[i]) for i in range(len(all_actions))])
-    return runout
+    return all(action_idx >= len(a) for a in all_actions)
 
 
-# Global perturbation state for smooth sliding effect
 _perturbation_state = {}
-
-# Global trajectory recording for visualization
 _trajectory_data = {}
 
-def init_perturbation_state(num_envs):
-    """Initialize accumulated perturbation state for each environment."""
+
+def init_perturbation_state(num_envs: int):
     global _perturbation_state, _trajectory_data
     _perturbation_state = {
-        'pos_offset': [np.zeros(3) for _ in range(num_envs)],
-        'rot_offset_euler': [np.zeros(3) for _ in range(num_envs)],
-        'velocity': [np.zeros(3) for _ in range(num_envs)],
-        'ang_velocity': [np.zeros(3) for _ in range(num_envs)],
+        "pos_offset": [np.zeros(3) for _ in range(num_envs)],
+        "rot_offset_euler": [np.zeros(3) for _ in range(num_envs)],
+        "velocity": [np.zeros(3) for _ in range(num_envs)],
+        "ang_velocity": [np.zeros(3) for _ in range(num_envs)],
     }
-    # Initialize trajectory recording
     _trajectory_data = {
-        'original_positions': [[] for _ in range(num_envs)],  # Original trajectory
-        'perturbed_positions': [[] for _ in range(num_envs)],  # Perturbed trajectory
-        'original_rotations': [[] for _ in range(num_envs)],   # Original euler angles
-        'perturbed_rotations': [[] for _ in range(num_envs)],  # Perturbed euler angles
+        "original_positions": [[] for _ in range(num_envs)],
+        "perturbed_positions": [[] for _ in range(num_envs)],
+        "original_rotations": [[] for _ in range(num_envs)],
+        "perturbed_rotations": [[] for _ in range(num_envs)],
     }
 
+
 def perturb_states(states, args, step: int, num_envs: int):
-    """Apply smooth continuous perturbations (sliding/drifting) to kinematic states.
-    
-    This creates a smooth sliding effect instead of instant jumps.
-    """
     if not args.enable_perturbation:
         return states
-    
+
     import random
     from copy import deepcopy
     from scipy.spatial.transform import Rotation as R
-    
+
     global _perturbation_state
-    
-    # Initialize if first time
     if not _perturbation_state:
         init_perturbation_state(num_envs)
-    
-    perturbed_states = []
-    
+
+    out_states = []
     for env_id, state in enumerate(states):
-        # Create a copy to modify
-        perturbed_state = deepcopy(state)
-        
-        # ========== NEW STRATEGY: Add restoring force to keep start/end same ==========
-        # 1. Random perturbation forces (like wind/ice)
-        # 2. Restoring force (like spring) pulling back to original trajectory
-        # 3. Result: slides in middle but returns to target at end
-        # 4. Separate control for position and rotation perturbations
-        
-        # Add random perturbation forces (scaled by SEPARATE position/rotation strength)
-        random_force = np.array([
-            random.gauss(0, 0.001 * args.perturb_position_strength),  # Random push in X
-            random.gauss(0, 0.001 * args.perturb_position_strength),  # Random push in Y
-            random.gauss(0, 0.0003 * args.perturb_position_strength)  # Less vertical (Z)
-        ])
-        
-        # Rotation perturbation uses SEPARATE strength (typically smaller)
-        random_torque = np.array([
-            random.gauss(0, 0.002 * args.perturb_rotation_strength),  # Random rotation around X
-            random.gauss(0, 0.002 * args.perturb_rotation_strength),  # Random rotation around Y
-            random.gauss(0, 0.001 * args.perturb_rotation_strength)   # Random rotation around Z
-        ])
-        
-        # Add restoring force (spring-like) that pulls back to offset=0
-        # This ensures the robot returns to original trajectory
-        restoring_strength = 0.15  # Spring constant
-        restoring_force = -restoring_strength * _perturbation_state['pos_offset'][env_id]
-        restoring_torque = -restoring_strength * _perturbation_state['rot_offset_euler'][env_id]
-        
-        # Net force = random perturbation + restoring force
-        _perturbation_state['velocity'][env_id] += random_force + restoring_force
-        _perturbation_state['ang_velocity'][env_id] += random_torque + restoring_torque
-        
-        # Apply damping (friction) - gradually reduce velocity (user-controllable)
-        _perturbation_state['velocity'][env_id] *= args.perturb_damping
-        _perturbation_state['ang_velocity'][env_id] *= args.perturb_damping
-        
-        # Integrate velocity to get position offset (sliding effect)
-        _perturbation_state['pos_offset'][env_id] += _perturbation_state['velocity'][env_id]
-        _perturbation_state['rot_offset_euler'][env_id] += _perturbation_state['ang_velocity'][env_id]
-        
-        # Soft clamp to allow larger movement (but still bounded)
-        # Position and rotation have INDEPENDENT max offsets now
-        max_pos_offset = 0.15 * args.perturb_position_strength  # Scale with position strength
-        max_rot_offset = 0.3 * args.perturb_rotation_strength   # Scale with rotation strength (~17°)
-        _perturbation_state['pos_offset'][env_id] = np.clip(
-            _perturbation_state['pos_offset'][env_id], -max_pos_offset, max_pos_offset
+        s = deepcopy(state)
+
+        # random push
+        rand_pos = np.array(
+            [
+                random.gauss(0, 0.001 * args.perturb_position_strength),
+                random.gauss(0, 0.001 * args.perturb_position_strength),
+                random.gauss(0, 0.0003 * args.perturb_position_strength),
+            ]
         )
-        _perturbation_state['rot_offset_euler'][env_id] = np.clip(
-            _perturbation_state['rot_offset_euler'][env_id], -max_rot_offset, max_rot_offset
+        rand_rot = np.array(
+            [
+                random.gauss(0, 0.002 * args.perturb_rotation_strength),
+                random.gauss(0, 0.002 * args.perturb_rotation_strength),
+                random.gauss(0, 0.001 * args.perturb_rotation_strength),
+            ]
         )
-        
-        # Apply accumulated offsets to robot state
-        if "robots" in perturbed_state:
-            for robot_name, robot_data in perturbed_state["robots"].items():
-                # Apply position offset (sliding)
-                if "pos" in robot_data:
-                    original_pos = robot_data["pos"]
-                    perturbed_pos = original_pos + _perturbation_state['pos_offset'][env_id]
-                    perturbed_state["robots"][robot_name]["pos"] = perturbed_pos
-                    
-                    # Record trajectory for visualization
+        # spring back
+        k = 0.15
+        restoring_pos = -k * _perturbation_state["pos_offset"][env_id]
+        restoring_rot = -k * _perturbation_state["rot_offset_euler"][env_id]
+
+        _perturbation_state["velocity"][env_id] += rand_pos + restoring_pos
+        _perturbation_state["ang_velocity"][env_id] += rand_rot + restoring_rot
+
+        _perturbation_state["velocity"][env_id] *= args.perturb_damping
+        _perturbation_state["ang_velocity"][env_id] *= args.perturb_damping
+
+        _perturbation_state["pos_offset"][env_id] += _perturbation_state["velocity"][env_id]
+        _perturbation_state["rot_offset_euler"][env_id] += _perturbation_state["ang_velocity"][env_id]
+
+        pos_max = 0.15 * args.perturb_position_strength
+        rot_max = 0.3 * args.perturb_rotation_strength
+        _perturbation_state["pos_offset"][env_id] = np.clip(
+            _perturbation_state["pos_offset"][env_id], -pos_max, pos_max
+        )
+        _perturbation_state["rot_offset_euler"][env_id] = np.clip(
+            _perturbation_state["rot_offset_euler"][env_id], -rot_max, rot_max
+        )
+
+        if "robots" in s:
+            for rname, rdata in s["robots"].items():
+                if "pos" in rdata:
+                    orig = rdata["pos"]
+                    pert = orig + _perturbation_state["pos_offset"][env_id]
+                    s["robots"][rname]["pos"] = pert
+
                     global _trajectory_data
                     if _trajectory_data:
-                        # Handle both numpy arrays and torch tensors
-                        orig_pos_np = original_pos.cpu().numpy() if hasattr(original_pos, 'cpu') else np.array(original_pos)
-                        pert_pos_np = perturbed_pos.cpu().numpy() if hasattr(perturbed_pos, 'cpu') else np.array(perturbed_pos)
-                        _trajectory_data['original_positions'][env_id].append(orig_pos_np.copy())
-                        _trajectory_data['perturbed_positions'][env_id].append(pert_pos_np.copy())
-                
-                # Apply rotation offset
-                if "rot" in robot_data:
-                    original_rot = robot_data["rot"]  # [w,x,y,z] format
-                    # Convert to [x,y,z,w] for scipy
-                    original_rot_xyzw = np.array([original_rot[1], original_rot[2], original_rot[3], original_rot[0]])
-                    original_R = R.from_quat(original_rot_xyzw)
-                    
-                    # Apply accumulated rotation offset
-                    offset_R = R.from_euler('xyz', _perturbation_state['rot_offset_euler'][env_id])
-                    perturbed_R = offset_R * original_R
-                    perturbed_rot_xyzw = perturbed_R.as_quat()
-                    
-                    # Convert back to [w,x,y,z]
-                    perturbed_state["robots"][robot_name]["rot"] = np.array([
-                        perturbed_rot_xyzw[3], perturbed_rot_xyzw[0], 
-                        perturbed_rot_xyzw[1], perturbed_rot_xyzw[2]
-                    ])
-                    
-                    # Record rotation for visualization
+                        orig_np = (
+                            orig.cpu().numpy() if hasattr(orig, "cpu") else np.array(orig)
+                        )
+                        pert_np = (
+                            pert.cpu().numpy() if hasattr(pert, "cpu") else np.array(pert)
+                        )
+                        _trajectory_data["original_positions"][env_id].append(orig_np)
+                        _trajectory_data["perturbed_positions"][env_id].append(pert_np)
+
+                if "rot" in rdata:
+                    orig = rdata["rot"]
+                    orig_xyzw = np.array([orig[1], orig[2], orig[3], orig[0]])
+                    R_orig = R.from_quat(orig_xyzw)
+                    R_off = R.from_euler("xyz", _perturbation_state["rot_offset_euler"][env_id])
+                    R_pert = R_off * R_orig
+                    pert_xyzw = R_pert.as_quat()
+                    s["robots"][rname]["rot"] = np.array(
+                        [pert_xyzw[3], pert_xyzw[0], pert_xyzw[1], pert_xyzw[2]]
+                    )
                     if _trajectory_data:
-                        original_euler = original_R.as_euler('xyz')
-                        perturbed_euler = perturbed_R.as_euler('xyz')
-                        # Euler angles are already numpy arrays from scipy
-                        _trajectory_data['original_rotations'][env_id].append(np.array(original_euler))
-                        _trajectory_data['perturbed_rotations'][env_id].append(np.array(perturbed_euler))
-                
-                # Add joint noise (small and continuous)
-                if args.perturb_action_noise > 0.0 and "dof_pos" in robot_data:
-                    for joint_name, pos in robot_data["dof_pos"].items():
-                        noise = random.gauss(0, args.perturb_action_noise * 0.1)  # Smaller for smoothness
-                        perturbed_state["robots"][robot_name]["dof_pos"][joint_name] = pos + noise
-        
-        # Log every 30 steps to avoid spam
-        pos_offset_norm = np.linalg.norm(_perturbation_state['pos_offset'][env_id])
-        if step % 30 == 0 and pos_offset_norm > 0.001:
-            pos_off = _perturbation_state['pos_offset'][env_id]
-            vel = _perturbation_state['velocity'][env_id]
-            log.info(f"🌊 Env {env_id} sliding continuously: "
-                    f"pos_offset=[{pos_off[0]:.3f},{pos_off[1]:.3f},{pos_off[2]:.3f}]m (norm={pos_offset_norm:.3f}), "
-                    f"velocity=[{vel[0]:.4f},{vel[1]:.4f},{vel[2]:.4f}]m/s")
-        
-        perturbed_states.append(perturbed_state)
-    
-    return perturbed_states
+                        _trajectory_data["original_rotations"][env_id].append(
+                            R_orig.as_euler("xyz")
+                        )
+                        _trajectory_data["perturbed_rotations"][env_id].append(
+                            R_pert.as_euler("xyz")
+                        )
+
+                if args.perturb_action_noise > 0.0 and "dof_pos" in rdata:
+                    for jn, pos in rdata["dof_pos"].items():
+                        noise = random.gauss(0, args.perturb_action_noise * 0.1)
+                        s["robots"][rname]["dof_pos"][jn] = pos + noise
+
+        out_states.append(s)
+    return out_states
 
 
 def plot_trajectory_comparison(save_path: str):
-    """Plot and save comparison between original and perturbed trajectories."""
     import matplotlib.pyplot as plt
-    from mpl_toolkits.mplot3d import Axes3D
-    
+    from mpl_toolkits.mplot3d import Axes3D  # noqa
+
     global _trajectory_data
-    
-    if not _trajectory_data or not _trajectory_data['original_positions']:
-        log.warning("No trajectory data to plot!")
+    if not _trajectory_data or not _trajectory_data["original_positions"]:
+        log.warning("No trajectory data to plot")
         return
-    
-    num_envs = len(_trajectory_data['original_positions'])
-    
-    # Create figure with subplots
+    n = len(_trajectory_data["original_positions"])
     fig = plt.figure(figsize=(20, 10))
-    
-    for env_id in range(num_envs):
-        if not _trajectory_data['original_positions'][env_id]:
+    for i in range(n):
+        if not _trajectory_data["original_positions"][i]:
             continue
-            
-        original_pos = np.array(_trajectory_data['original_positions'][env_id])
-        perturbed_pos = np.array(_trajectory_data['perturbed_positions'][env_id])
-        
-        # 3D trajectory plot
-        ax1 = fig.add_subplot(2, num_envs, env_id + 1, projection='3d')
-        ax1.plot(original_pos[:, 0], original_pos[:, 1], original_pos[:, 2], 
-                'b-', linewidth=2, label='Original', alpha=0.7)
-        ax1.plot(perturbed_pos[:, 0], perturbed_pos[:, 1], perturbed_pos[:, 2], 
-                'r--', linewidth=2, label='Perturbed', alpha=0.7)
-        ax1.scatter(original_pos[0, 0], original_pos[0, 1], original_pos[0, 2], 
-                   c='green', s=100, marker='o', label='Start')
-        ax1.scatter(original_pos[-1, 0], original_pos[-1, 1], original_pos[-1, 2], 
-                   c='purple', s=100, marker='s', label='End')
-        ax1.set_xlabel('X (m)')
-        ax1.set_ylabel('Y (m)')
-        ax1.set_zlabel('Z (m)')
-        ax1.set_title(f'Env {env_id} - 3D Trajectory')
-        ax1.legend()
-        ax1.grid(True)
-        
-        # 2D top-down view (XY plane)
-        ax2 = fig.add_subplot(2, num_envs, num_envs + env_id + 1)
-        ax2.plot(original_pos[:, 0], original_pos[:, 1], 
-                'b-', linewidth=2, label='Original', alpha=0.7)
-        ax2.plot(perturbed_pos[:, 0], perturbed_pos[:, 1], 
-                'r--', linewidth=2, label='Perturbed', alpha=0.7)
-        ax2.scatter(original_pos[0, 0], original_pos[0, 1], 
-                   c='green', s=100, marker='o', label='Start')
-        ax2.scatter(original_pos[-1, 0], original_pos[-1, 1], 
-                   c='purple', s=100, marker='s', label='End')
-        
-        # Calculate and display statistics
-        max_deviation = np.max(np.linalg.norm(perturbed_pos - original_pos, axis=1))
-        mean_deviation = np.mean(np.linalg.norm(perturbed_pos - original_pos, axis=1))
-        ax2.text(0.02, 0.98, f'Max dev: {max_deviation:.3f}m\nMean dev: {mean_deviation:.3f}m',
-                transform=ax2.transAxes, verticalalignment='top',
-                bbox=dict(boxstyle='round', facecolor='wheat', alpha=0.5))
-        
-        ax2.set_xlabel('X (m)')
-        ax2.set_ylabel('Y (m)')
-        ax2.set_title(f'Env {env_id} - Top View (XY)')
+        orig = np.array(_trajectory_data["original_positions"][i])
+        pert = np.array(_trajectory_data["perturbed_positions"][i])
+
+        ax = fig.add_subplot(2, n, i + 1, projection="3d")
+        ax.plot(orig[:, 0], orig[:, 1], orig[:, 2], "b-", label="orig")
+        ax.plot(pert[:, 0], pert[:, 1], pert[:, 2], "r--", label="pert")
+        ax.legend()
+        ax.set_title(f"Env {i} 3D")
+
+        ax2 = fig.add_subplot(2, n, n + i + 1)
+        ax2.plot(orig[:, 0], orig[:, 1], "b-", label="orig")
+        ax2.plot(pert[:, 0], pert[:, 1], "r--", label="pert")
         ax2.legend()
-        ax2.grid(True)
-        ax2.axis('equal')
-    
+        ax2.axis("equal")
+        ax2.set_title(f"Env {i} top")
+
     plt.tight_layout()
-    plt.savefig(save_path, dpi=150, bbox_inches='tight')
-    log.info(f"📊 Trajectory comparison plot saved to: {save_path}")
+    plt.savefig(save_path, dpi=150, bbox_inches="tight")
+    log.info(f"plot saved to {save_path}")
     plt.close()
-    
-    # Also save rotation comparison if available
-    if _trajectory_data['original_rotations'][0]:
-        fig2, axes = plt.subplots(num_envs, 3, figsize=(15, 5 * num_envs))
-        if num_envs == 1:
-            axes = axes.reshape(1, -1)
-        
-        for env_id in range(num_envs):
-            original_rot = np.array(_trajectory_data['original_rotations'][env_id])
-            perturbed_rot = np.array(_trajectory_data['perturbed_rotations'][env_id])
-            
-            for i, axis_name in enumerate(['Roll (X)', 'Pitch (Y)', 'Yaw (Z)']):
-                axes[env_id, i].plot(original_rot[:, i], 'b-', linewidth=2, label='Original', alpha=0.7)
-                axes[env_id, i].plot(perturbed_rot[:, i], 'r--', linewidth=2, label='Perturbed', alpha=0.7)
-                axes[env_id, i].set_xlabel('Step')
-                axes[env_id, i].set_ylabel('Angle (rad)')
-                axes[env_id, i].set_title(f'Env {env_id} - {axis_name}')
-                axes[env_id, i].legend()
-                axes[env_id, i].grid(True)
-        
-        plt.tight_layout()
-        rotation_save_path = save_path.replace('.png', '_rotation.png')
-        plt.savefig(rotation_save_path, dpi=150, bbox_inches='tight')
-        log.info(f"📊 Rotation comparison plot saved to: {rotation_save_path}")
-        plt.close()
 
 
 def add_action_noise(actions, args):
-    """Add noise to actions for robustness."""
     if args.perturb_action_noise <= 0.0:
         return actions
-    
     import random
-    noisy_actions = []
-    for action in actions:
-        if action and "dof_pos_target" in action:
-            noisy_action = action.copy()
-            noisy_dof_pos = {}
-            for joint_name, pos in action["dof_pos_target"].items():
-                noise = random.gauss(0, args.perturb_action_noise)
-                noisy_dof_pos[joint_name] = pos + noise
-            noisy_action["dof_pos_target"] = noisy_dof_pos
-            noisy_actions.append(noisy_action)
+
+    out = []
+    for a in actions:
+        if a and "dof_pos_target" in a:
+            na = a.copy()
+            nd = {}
+            for jn, pos in a["dof_pos_target"].items():
+                nd[jn] = pos + random.gauss(0, args.perturb_action_noise)
+            na["dof_pos_target"] = nd
+            out.append(na)
         else:
-            noisy_actions.append(action)
-    
-    return noisy_actions
+            out.append(a)
+    return out
 
 
 def quat_xyzw_to_rotmat(q: torch.Tensor) -> torch.Tensor:
-    """Convert quaternion (xyzw format) to rotation matrix."""
     q = q / q.norm(p=2, dim=-1, keepdim=True).clamp_min(1e-9)
     x, y, z, w = q.unbind(-1)
-    
     xx, yy, zz = x * x, y * y, z * z
     xy, xz, yz = x * y, x * z, y * z
     wx, wy, wz = w * x, w * y, w * z
@@ -443,16 +349,17 @@ def quat_xyzw_to_rotmat(q: torch.Tensor) -> torch.Tensor:
     m21 = 2 * (yz + wx)
     m22 = 1 - 2 * (xx + yy)
 
-    mat = torch.stack([
-        torch.stack([m00, m01, m02], dim=-1),
-        torch.stack([m10, m11, m12], dim=-1),
-        torch.stack([m20, m21, m22], dim=-1),
-    ], dim=-2)
-    return mat
+    return torch.stack(
+        [
+            torch.stack([m00, m01, m02], dim=-1),
+            torch.stack([m10, m11, m12], dim=-1),
+            torch.stack([m20, m21, m22], dim=-1),
+        ],
+        dim=-2,
+    )
 
 
 def get_actuated_joint_indices(kin) -> List[int]:
-    """Get indices of actuated joints."""
     idxs: List[int] = []
     for j in range(1, kin.num_joint):
         if kin.joint_dof_idx[j] != -1:
@@ -461,82 +368,120 @@ def get_actuated_joint_indices(kin) -> List[int]:
 
 
 class EnhancedObsSaver:
-    """Save observations and prepare data for enhanced pkl export."""
+    """
+    - 保存大图(可选)
+    - 缩成 224x224 存着
+    - 再用你截图的 CLIP transform 把“原始大图”过一遍，得到 per-frame CLIP feature
+    """
 
-    def __init__(self, image_dir: str | None = None, video_path: str | None = None, 
-                 save_quality: int = 95, image_size: int = 224):
+    def __init__(
+        self,
+        image_dir: str | None = None,
+        video_path: str | None = None,
+        save_quality: int = 95,
+        image_size: int = 224,
+        clip_model=None,
+        clip_img_transform=None,
+        clip_device: str = "cpu",
+        save_clip_feats: bool = False,
+    ):
         self.image_dir = image_dir
         self.video_path = video_path
         self.save_quality = save_quality
         self.image_size = image_size
-        self.images: list[NDArray] = []
-        self.resized_images: list[NDArray] = []
+        self.images: list[NDArray] = []          # 原始大图
+        self.resized_images: list[NDArray] = []  # 224x224
         self.image_idx = 0
 
+        self.clip_model = clip_model
+        self.clip_img_transform = clip_img_transform
+        self.clip_device = clip_device
+        self.save_clip_feats = (
+            save_clip_feats
+            and (clip_model is not None)
+            and (clip_img_transform is not None)
+        )
+        self.clip_feats: list[np.ndarray] = []   # 这里会存每一帧的 CLIP feature
+
     def add(self, state: TensorState):
-        """Add observation to the list."""
-        if self.image_dir is None and self.video_path is None:
+        if (
+            self.image_dir is None
+            and self.video_path is None
+            and not self.save_clip_feats
+        ):
             return
 
         try:
             rgb_data = next(iter(state.cameras.values())).rgb
-            image = make_grid(rgb_data.permute(0, 3, 1, 2) / 255, nrow=int(rgb_data.shape[0] ** 0.5))
+            image = make_grid(
+                rgb_data.permute(0, 3, 1, 2) / 255,
+                nrow=int(rgb_data.shape[0] ** 0.5),
+            )
         except Exception as e:
-            log.error(f"Error adding observation: {e}")
+            log.error(f"Error adding obs: {e}")
             return
 
+        # 1) 原始大图 (H,W,3) uint8
+        img_np = image.cpu().numpy().transpose(1, 2, 0)
+        img_np = (img_np * 255).astype(np.uint8)
+
+        # 1.1 可选保存到文件
         if self.image_dir is not None:
             os.makedirs(self.image_dir, exist_ok=True)
-            image_np = image.cpu().numpy().transpose(1, 2, 0)
-            image_np = (image_np * 255).astype(np.uint8)
-            pil_image = Image.fromarray(image_np)
-            pil_image.save(
+            Image.fromarray(img_np).save(
                 os.path.join(self.image_dir, f"rgb_{self.image_idx:04d}.png"),
                 quality=self.save_quality,
-                optimize=False
+                optimize=False,
             )
-            self.image_idx += 1
 
-        image = image.cpu().numpy().transpose(1, 2, 0)
-        image = (image * 255).astype(np.uint8)
-        self.images.append(image)
-        
-        resized = Image.fromarray(image).resize((self.image_size, self.image_size), Image.LANCZOS)
-        self.resized_images.append(np.asarray(resized, dtype=np.uint8))
+        self.images.append(img_np)
+        self.image_idx += 1
+
+        # 2) 把要写进 pkl 的做成 224×224 (你之前就是这个)
+        resized_pil = Image.fromarray(img_np).resize(
+            (self.image_size, self.image_size),
+            Image.LANCZOS,
+        )
+        resized_np = np.asarray(resized_pil, dtype=np.uint8)
+        self.resized_images.append(resized_np)
+
+        # 3) CLIP 一帧一帧 encode
+        if self.save_clip_feats:
+            try:
+                # 这里就是你截图的那一套：ToPILImage -> CenterCrop(720) -> Resize(224,224) -> ToTensor -> Normalize
+                clip_tensor = self.clip_img_transform(img_np.astype(np.uint8))
+                clip_tensor = clip_tensor.unsqueeze(0).to(self.clip_device)
+                with torch.no_grad():
+                    feat = self.clip_model.encode_image(clip_tensor).float()
+                    feat = feat / feat.norm(dim=-1, keepdim=True).clamp_min(1e-6)
+                self.clip_feats.append(feat.cpu().numpy()[0])
+            except Exception as e:
+                log.error(f"[CLIP] frame {self.image_idx-1} encode failed: {e}")
+                # 保持长度一致
+                self.clip_feats.append(np.zeros((512,), dtype=np.float32))
 
     def save(self):
-        """Save video if path is specified."""
         if self.video_path is not None and self.images:
-            log.info(f"Saving video of {len(self.images)} frames to {self.video_path}")
             os.makedirs(os.path.dirname(self.video_path), exist_ok=True)
             iio.mimsave(
-                self.video_path, 
-                self.images, 
+                self.video_path,
+                self.images,
                 fps=30,
                 quality=8,
-                codec='libx264' if self.video_path.endswith('.mp4') else None
+                codec="libx264" if self.video_path.endswith(".mp4") else None,
             )
 
 
 def update_camera_poses(env, args):
-    """Update camera poses to follow the robot's head."""
     if not args.first_person_view:
         return
-        
-    if not hasattr(env, 'handler'):
-        log.warning("Environment does not have a handler attribute, cannot update camera poses")
+    if not hasattr(env, "handler"):
         return
-        
     handler = env.handler
-    
-    if not hasattr(handler, 'robot') or not handler.robot:
-        log.warning("Robot not found, cannot update camera poses")
+    if not hasattr(handler, "robot") or not handler.robot:
         return
-        
-    if not hasattr(handler, 'camera_ids') or not handler.camera_ids:
-        log.warning("Cameras not found, cannot update camera poses")
+    if not hasattr(handler, "camera_ids") or not handler.camera_ids:
         return
-    
     robot_name = handler.robot.name
     try:
         head_link = None
@@ -544,313 +489,233 @@ def update_camera_poses(env, args):
             if link.get_name() == args.head_link_name:
                 head_link = link
                 break
-                
         if head_link is None:
-            log.warning(f"Head link '{args.head_link_name}' not found, cannot update camera poses")
-            available_links = [link.get_name() for link in handler.link_ids.get(robot_name, [])]
-            log.info(f"Available links: {available_links}")
             return
-            
         head_pose = head_link.get_pose()
         head_pos = head_pose.p
         head_rot = head_pose.q
-        
-        offset = np.array(args.camera_offset)
-        
+
         from scipy.spatial.transform import Rotation as R
+
+        offset = np.array(args.camera_offset)
         rot = R.from_quat([head_rot[1], head_rot[2], head_rot[3], head_rot[0]])
         offset_world = rot.apply(offset)
-        
-        camera_pos = head_pos + offset_world
-        
-        direction = np.array(args.camera_direction)
-        direction_world = rot.apply(direction)
-        look_at = camera_pos + direction_world
-        
-        for camera_name, camera_id in handler.camera_ids.items():
-            handler.set_camera_look_at(camera_name, camera_pos, look_at)
-            
-        log.debug(f"Updated camera pose: pos={camera_pos}, look_at={look_at}")
-        
+        cam_pos = head_pos + offset_world
+        dir_local = np.array(args.camera_direction)
+        dir_world = rot.apply(dir_local)
+        look_at = cam_pos + dir_world
+        for cname, _cid in handler.camera_ids.items():
+            handler.set_camera_look_at(cname, cam_pos, look_at)
+        handler.refresh_render()
     except Exception as e:
-        log.error(f"Error updating camera poses: {e}")
+        log.error(f"update_camera_poses error: {e}")
 
 
 def load_motion_data(motion_config_path: str):
-    """Load motion data from yaml config."""
-    with open(motion_config_path, 'r') as f:
-        config = yaml.safe_load(f)
-    
-    motion_file = config.get('motion_file')
+    with open(motion_config_path, "r") as f:
+        cfg = yaml.safe_load(f)
+    motion_file = cfg.get("motion_file")
     if motion_file:
-        log.info(f"Loading motion data from {motion_file}")
-        with open(motion_file, 'rb') as f:
-            motion_data = pickle.load(f)
-        return motion_data
-    
-    root_path = config.get('root_path', '')
-    motions = config.get('motions', [])
-    
+        with open(motion_file, "rb") as f:
+            return pickle.load(f)
+    root_path = cfg.get("root_path", "")
+    motions = cfg.get("motions", [])
     if not motions:
-        raise ValueError(f"No motion_file or motions specified in {motion_config_path}")
-    
-    motion_file_relative = motions[0].get('file')
-    if not motion_file_relative:
-        raise ValueError(f"No file specified in first motion entry")
-    
-    motion_file = os.path.join(root_path, motion_file_relative)
-    
-    log.info(f"Loading motion data from {motion_file}")
-    with open(motion_file, 'rb') as f:
-        motion_data = pickle.load(f)
-    
-    return motion_data
+        raise ValueError(f"No motions in {motion_config_path}")
+    motion_file_rel = motions[0].get("file")
+    if not motion_file_rel:
+        raise ValueError("first motion has no file")
+    motion_file = os.path.join(root_path, motion_file_rel)
+    with open(motion_file, "rb") as f:
+        return pickle.load(f)
 
 
-def save_enhanced_pkl(output_path: str, motion_data: dict, resized_images: list, 
-                     urdf_path: str, device: str = "cpu"):
-    """Save enhanced pkl with dof_rot and resized rgb images."""
-    log.info(f"Preparing enhanced pkl data...")
-    
+def save_enhanced_pkl(
+    output_path: str,
+    motion_data: dict,
+    resized_images: list,
+    urdf_path: str,
+    device: str = "cpu",
+    clip_image_embeds: list[np.ndarray] | None = None,
+):
+    """
+    NOTE: 你说“不要弄个新的键，直接覆盖掉原来的 rgb_images”，
+    所以这里的逻辑是：
+
+    - 如果传进来 clip_image_embeds，就用它覆盖 out["rgb_images"]
+    - 否则就用原来的 224x224 resized_images 写到 out["rgb_images"]
+    """
+    log.info("Preparing enhanced pkl ...")
+
     if urdf_path and not os.path.isabs(urdf_path):
-        urdf_path_abs = os.path.join(project_root, urdf_path)
-        if os.path.exists(urdf_path_abs):
-            urdf_path = urdf_path_abs
-            log.info(f"Resolved relative URDF path to: {urdf_path}")
+        abs1 = os.path.join(project_root, urdf_path)
+        if os.path.exists(abs1):
+            urdf_path = abs1
         else:
-            urdf_path_cwd = os.path.join(os.getcwd(), urdf_path)
-            if os.path.exists(urdf_path_cwd):
-                urdf_path = urdf_path_cwd
-                log.info(f"Resolved URDF path relative to cwd: {urdf_path}")
-    
-    log.info(f"URDF path: {urdf_path}")
-    log.info(f"URDF exists: {os.path.exists(urdf_path) if urdf_path else False}")
-    log.info(f"Current working directory: {os.getcwd()}")
-    log.info(f"Project root: {project_root}")
-    
-    required_keys = ["root_pos", "root_rot", "dof_pos"]
-    for key in required_keys:
-        if key not in motion_data:
-            raise ValueError(f"Missing required key '{key}' in motion data")
+            abs2 = os.path.join(os.getcwd(), urdf_path)
+            if os.path.exists(abs2):
+                urdf_path = abs2
 
-    root_pos = torch.tensor(np.asarray(motion_data["root_pos"], dtype=np.float32), device=device)
-    root_rot_wxyz = torch.tensor(np.asarray(motion_data["root_rot"], dtype=np.float32), device=device)
-    dof_pos = torch.tensor(np.asarray(motion_data["dof_pos"], dtype=np.float32), device=device)
+    required = ["root_pos", "root_rot", "dof_pos"]
+    for k in required:
+        if k not in motion_data:
+            raise ValueError(f"Missing required key {k}")
 
-    T = dof_pos.shape[0]
+    root_pos = torch.tensor(np.asarray(motion_data["root_pos"], np.float32), device=device)
+    root_rot_wxyz = torch.tensor(np.asarray(motion_data["root_rot"], np.float32), device=device)
+    dof_pos = torch.tensor(np.asarray(motion_data["dof_pos"], np.float32), device=device)
+
+    T_len = dof_pos.shape[0]
     N = dof_pos.shape[1]
-    log.info(f"Motion data shape: T={T}, N={N}")
 
     out = dict(motion_data)
 
-    if not urdf_path:
-        log.warning("No URDF path provided, skipping dof_rot computation")
-    elif not os.path.exists(urdf_path):
-        log.warning(f"URDF path does not exist: {urdf_path}, skipping dof_rot computation")
-        log.info(f"Please check if the file exists at: {os.path.abspath(urdf_path)}")
+    # dof_rot 部分跟你原来的保持一致
+    if not urdf_path or not os.path.exists(urdf_path):
+        log.warning("URDF missing, skip dof_rot")
     else:
         try:
-            log.info("Attempting to import motion_tools...")
             from motion_tools.utils.kinematics_model import KinematicsModel
-            log.info("motion_tools imported successfully")
-            
-            log.info(f"Loading kinematics model from {urdf_path}...")
+
             kin = KinematicsModel(file_path=urdf_path, device=device)
-            log.info(f"Kinematics model loaded successfully, num_dof={kin.num_dof}")
-            
             if kin.num_dof != N:
-                log.warning(f"URDF num_dof={kin.num_dof} does not match dof_pos dim={N}")
+                log.warning(f"URDF dof {kin.num_dof} != data dof {N}, will clip")
                 N = min(kin.num_dof, N)
                 dof_pos = dof_pos[:, :N]
+            act_idxs = get_actuated_joint_indices(kin)
+            num_act = len(act_idxs)
+            dof_rot = torch.zeros((T_len, num_act, 3, 3), dtype=torch.float32, device=device)
 
-            actuated_body_indices = get_actuated_joint_indices(kin)
-            num_act = len(actuated_body_indices)
-            log.info(f"Found {num_act} actuated joints")
+            rr_xyzw = torch.stack(
+                [
+                    root_rot_wxyz[:, 1],
+                    root_rot_wxyz[:, 2],
+                    root_rot_wxyz[:, 3],
+                    root_rot_wxyz[:, 0],
+                ],
+                dim=-1,
+            )
 
-            dof_rot = torch.zeros((T, num_act, 3, 3), dtype=torch.float32, device=device)
-
-            rr_xyzw = torch.stack([
-                root_rot_wxyz[:, 1], root_rot_wxyz[:, 2], root_rot_wxyz[:, 3], root_rot_wxyz[:, 0]
-            ], dim=-1)
-
-            batch_size = 512
-            log.info(f"Computing forward kinematics for {T} frames...")
-            
-            for start in range(0, T, batch_size):
-                end = min(start + batch_size, T)
-                
-                if start % (batch_size * 4) == 0:
-                    log.info(f"Processing batch [{start+1}-{end}/{T}]...")
-                
-                rp = root_pos[start:end]
-                rr = rr_xyzw[start:end]
-                dq = dof_pos[start:end]
-
-                body_pos_w, body_rot_xyzw = kin.forward_kinematics(rp, rr, dq)
-                body_rot_sel = body_rot_xyzw[:, actuated_body_indices, :]
-                rotmat = quat_xyzw_to_rotmat(body_rot_sel.reshape(-1, 4)).reshape(-1, num_act, 3, 3)
-                dof_rot[start:end] = rotmat
-
-            log.info("Forward kinematics computation completed.")
+            bs = 512
+            for st in range(0, T_len, bs):
+                ed = min(st + bs, T_len)
+                rp = root_pos[st:ed]
+                rr = rr_xyzw[st:ed]
+                dq = dof_pos[st:ed]
+                bpos, brot = kin.forward_kinematics(rp, rr, dq)
+                brot_sel = brot[:, act_idxs, :]
+                rotmat = quat_xyzw_to_rotmat(brot_sel.reshape(-1, 4)).reshape(
+                    -1, num_act, 3, 3
+                )
+                dof_rot[st:ed] = rotmat
             out["dof_rot"] = dof_rot.cpu().numpy()
-            log.info(f"Successfully added dof_rot with shape {dof_rot.shape}")
-            
-        except ImportError as e:
-            log.error(f"Failed to import motion_tools: {e}")
-            log.error("Please ensure motion_tools is installed")
-            import traceback
-            traceback.print_exc()
         except Exception as e:
-            log.error(f"Error computing dof_rot: {e}")
-            import traceback
-            traceback.print_exc()
+            log.error(f"dof_rot failed: {e}")
 
-    if len(resized_images) > 0:
-        if len(resized_images) != T:
-            log.warning(f"Image count ({len(resized_images)}) != frame count ({T})")
-            resized_images = resized_images[:min(T, len(resized_images))]
-        out["rgb_images"] = resized_images
-        log.info(f"Added {len(resized_images)} resized RGB images ({resized_images[0].shape})")
+    # ====== 这里是关键 ======
+    # 如果有 clip 的结果，就直接覆盖 rgb_images
+    if clip_image_embeds is not None and len(clip_image_embeds) > 0:
+        if len(clip_image_embeds) != T_len:
+            log.warning(
+                f"CLIP frames {len(clip_image_embeds)} != motion frames {T_len}, will trim"
+            )
+        clip_arr = np.asarray(clip_image_embeds[:T_len], dtype=np.float32)
+        out["rgb_images"] = clip_arr
+        log.info(f"rgb_images OVERWRITTEN by CLIP features, shape={clip_arr.shape}")
+    else:
+        # 否则就还是你原来那种 224x224 图
+        if resized_images:
+            if len(resized_images) != T_len:
+                log.warning(
+                    f"image count {len(resized_images)} != motion frames {T_len}, trim"
+                )
+            out["rgb_images"] = resized_images[:T_len]
+            log.info(
+                f"rgb_images saved as 224x224 images, shape={(len(resized_images[:T_len]),)}"
+            )
 
     os.makedirs(os.path.dirname(output_path) or ".", exist_ok=True)
-    log.info(f"Saving enhanced data to {output_path}...")
-    
     with open(output_path, "wb") as f:
         pickle.dump(out, f)
-    
-    log.info("Enhanced pkl saved successfully!")
-    log.info(f"Final pkl keys: {list(out.keys())}")
-    if "dof_rot" in out:
-        log.info(f"dof_rot shape: {out['dof_rot'].shape}")
-    else:
-        log.warning("WARNING: dof_rot was NOT added to the pkl file!")
+    log.info(f"Enhanced pkl saved to {output_path}, keys={list(out.keys())}")
 
 
 def replay_single_trajectory(env, scenario, traj_path, args, obs_saver, motion_data=None):
-    """Replay a single trajectory file."""
     log.info(f"Replaying trajectory: {traj_path}")
-    
-    motion_length = None
+
+    motion_len = None
     if motion_data is not None and "dof_pos" in motion_data:
-        motion_length = len(motion_data["dof_pos"])
-        log.info(f"Motion data length: {motion_length} frames")
-    
-    tic = time.time()
-    assert os.path.exists(traj_path), f"Trajectory file: {traj_path} does not exist."
-    original_traj_filepath = scenario.task.traj_filepath
+        motion_len = len(motion_data["dof_pos"])
+
+    assert os.path.exists(traj_path), f"{traj_path} not exist"
+    orig_traj = scenario.task.traj_filepath
     scenario.task.traj_filepath = traj_path
     init_states, all_actions, all_states = get_traj(
         scenario.task, scenario.robots[0], env.handler
     )
-    scenario.task.traj_filepath = original_traj_filepath
-    toc = time.time()
-    log.trace(f"Time to load data: {toc - tic:.2f}s")
+    scenario.task.traj_filepath = orig_traj
 
-    tic = time.time()
-    
     if args.robot_height_offset != 0.0:
-        for state in init_states[:args.num_envs]:
-            if hasattr(state, 'root_pos'):
-                state.root_pos[2] += args.robot_height_offset
-            
-    obs, extras = env.reset(states=init_states[:args.num_envs])
-    
+        for s in init_states[: args.num_envs]:
+            if hasattr(s, "root_pos"):
+                s.root_pos[2] += args.robot_height_offset
+
+    obs, _ = env.reset(states=init_states[: args.num_envs])
+
     if args.first_person_view:
         update_camera_poses(env, args)
-        env.handler.refresh_render()
-        
-    toc = time.time()
-    log.trace(f"Time to reset: {toc - tic:.2f}s")
     obs_saver.add(obs)
 
     step = 0
     while True:
-        if motion_length is not None and step >= motion_length:
-            log.info(f"Reached motion length limit ({motion_length} frames), stopping")
+        if motion_len is not None and step >= motion_len:
+            log.info("reached motion length, stop")
             break
-        
-        tic = time.time()
+
         if args.object_states:
             if all_states is None:
-                raise ValueError("All states are None, please check the trajectory file")
+                raise ValueError("all_states is None")
             states = get_states(all_states, step, args.num_envs)
-            
-            # Apply kinematic perturbations (for object_states mode)
             states = perturb_states(states, args, step, args.num_envs)
-            
             env.handler.set_states(states)
-            
             if args.first_person_view:
                 update_camera_poses(env, args)
-                
             env.handler.refresh_render()
             obs = env.handler.get_states()
-
             success = env.handler.task.checker.check(env.handler)
-            if success.any():
-                log.info(f"Env {success.nonzero().squeeze(-1).tolist()} succeeded!")
             if success.all():
                 break
-
         else:
             actions = get_actions(all_actions, step, args.num_envs, scenario.robots[0])
-            
-            # Add action noise if enabled
             actions = add_action_noise(actions, args)
-            
-            log.info(f"Step {step}: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
-            
             obs, reward, success, time_out, extras = env.step(actions)
-            
             if args.first_person_view:
                 update_camera_poses(env, args)
-
-            if success.any():
-                log.info(f"Env {success.nonzero().squeeze(-1).tolist()} succeeded!")
-
-            if time_out.any():
-                log.info(f"Env {time_out.nonzero().squeeze(-1).tolist()} timed out!")
-                log.info(f"After step: episode_length_buf={env.episode_length_buf}, episode_length={env.handler.scenario.episode_length}")
-
             if success.all() or time_out.all():
                 break
 
-        toc = time.time()
-        log.trace(f"Time to step: {toc - tic:.2f}s")
-
-        tic = time.time()
         obs_saver.add(obs)
-        toc = time.time()
-        log.trace(f"Time to save obs: {toc - tic:.2f}s")
         step += 1
 
         if args.stop_on_runout and get_runout(all_actions, step):
-            log.info("Run out of actions, stopping")
+            log.info("actions run out, stop")
             break
 
     obs_saver.save()
-    
-    # Plot trajectory comparison if enabled
     if args.save_trajectory_plot:
         plot_trajectory_comparison(args.save_trajectory_plot)
-    
     return obs_saver
 
 
 def main():
     render_cfg = RenderCfg(mode=args.render_mode)
-    
+
     sensor_width_mm = 36.0
     fx_pixels = 1386.4
-    fy_pixels = 1388.6
     width_pixels = 1920
-    height_pixels = 1080
-    cx_pixels = 960
-    cy_pixels = 540
-    
     horizontal_aperture = (width_pixels / fx_pixels) * sensor_width_mm
     focal_length = fx_pixels * sensor_width_mm / width_pixels
-    
+
     if args.first_person_view:
         camera = PinholeCameraCfg(
             pos=(0.0, 0.0, 0.0),
@@ -858,36 +723,18 @@ def main():
             width=args.camera_width,
             height=args.camera_height,
             focal_length=focal_length,
-            horizontal_aperture=horizontal_aperture
+            horizontal_aperture=horizontal_aperture,
         )
-        fovx = camera.horizontal_fov
-        fovy = camera.vertical_fov
-        log.info(f"fovx: {fovx}, fovy: {fovy}")
-        log.info(f"Camera offset: {args.camera_offset}, direction: {args.camera_direction}")
-        log.info(f"Camera intrinsics: focal_length={focal_length:.3f}mm, horizontal_aperture={horizontal_aperture:.3f}mm")
-        log.info(f"Original params: fx={fx_pixels}, fy={fy_pixels}, resolution={width_pixels}x{height_pixels}")
     else:
-        camera_pos = (2.5, 0.0, 2.5)
-        look_at_pos = (-3.0, 0.0, 0.0)
-        
         camera = PinholeCameraCfg(
-            pos=camera_pos, 
-            look_at=look_at_pos,
+            pos=(2.5, 0.0, 2.5),
+            look_at=(-3.0, 0.0, 0.0),
             width=args.camera_width,
             height=args.camera_height,
             focal_length=focal_length,
-            horizontal_aperture=horizontal_aperture
+            horizontal_aperture=horizontal_aperture,
         )
-        log.info(f"Using standard fixed camera")
-        log.info(f"Camera intrinsics: focal_length={focal_length:.3f}mm, horizontal_aperture={horizontal_aperture:.3f}mm")
-        log.info(f"Original params: fx={fx_pixels}, fy={fy_pixels}, resolution={width_pixels}x{height_pixels}")
-    
-    log.info(f"Image Quality Settings:")
-    log.info(f"  Camera Resolution: {args.camera_width}x{args.camera_height}")
-    log.info(f"  Render Mode: {args.render_mode}")
-    log.info(f"  Save Quality: {args.save_quality}/100")
-    log.info(f"  Resized Image Size: {args.image_size}x{args.image_size}")
-    
+
     scenario = ScenarioCfg(
         task=args.task,
         robots=[args.robot],
@@ -905,63 +752,105 @@ def main():
         headless=args.headless,
     )
 
-    tic = time.time()
+    # create env
     if scenario.renderer is None:
-        log.info(f"Using simulator: {scenario.sim}")
         env_class = get_sim_env_class(SimType(scenario.sim))
         env = env_class(scenario)
     else:
-        log.info(f"Using simulator: {scenario.sim}, renderer: {scenario.renderer}")
-        env_class_render = get_sim_env_class(SimType(scenario.renderer))
-        env_render = env_class_render(scenario)
-        env_class_physics = get_sim_env_class(SimType(scenario.sim))
-        env_physics = env_class_physics(scenario)
-        env = HybridSimEnv(env_physics, env_render)
-    toc = time.time()
-    log.trace(f"Time to launch: {toc - tic:.2f}s")
+        env_render = get_sim_env_class(SimType(scenario.renderer))(scenario)
+        env_phys = get_sim_env_class(SimType(scenario.sim))(scenario)
+        env = HybridSimEnv(env_phys, env_render)
+
+    # ===== load CLIP (按你截图的）=====
+    clip_model = None
+    clip_img_transform = None
+    clip_device = "cpu"
+    if args.use_clip:
+        clip_device = args.clip_device
+        try:
+            import clip as _clip
+            # 先试你工程里的 load_and_freeze_clip
+            load_and_freeze_clip = None
+            try:
+                from clip_utils import load_and_freeze_clip  # 换成你工程里的路径
+            except Exception:
+                try:
+                    from motion_tools.utils.clip_utils import load_and_freeze_clip
+                except Exception:
+                    load_and_freeze_clip = None
+
+            if load_and_freeze_clip is not None:
+                clip_model = load_and_freeze_clip(
+                    clip_version=args.clip_model_name, device=clip_device
+                )
+                log.info(f"[CLIP] loaded via load_and_freeze_clip on {clip_device}")
+            else:
+                clip_model, _ = _clip.load(args.clip_model_name, device=clip_device)
+                clip_model.eval()
+                log.info(f"[CLIP] loaded via clip.load on {clip_device}")
+
+            # 这里完全复刻你截图里的 transform
+            clip_mean = (0.48145466, 0.4578275, 0.40821073)
+            clip_std = (0.26862954, 0.26130258, 0.27577711)
+            clip_img_transform = T.Compose(
+                [
+                    T.ToPILImage(),
+                    T.CenterCrop(720),
+                    T.Resize((224, 224)),
+                    T.ToTensor(),
+                    T.Normalize(mean=clip_mean, std=clip_std),
+                ]
+            )
+        except Exception as e:
+            log.error(f"[CLIP] load failed: {e}")
+            args.use_clip = False
 
     motion_data = None
     if args.motion_config:
         motion_data = load_motion_data(args.motion_config)
 
-    traj_filepaths = scenario.task.traj_filepath
-    if not isinstance(traj_filepaths, list):
-        traj_filepaths = [traj_filepaths]
+    trajs = scenario.task.traj_filepath
+    if not isinstance(trajs, list):
+        trajs = [trajs]
 
     if args.save_enhanced_pkl_dir:
         os.makedirs(args.save_enhanced_pkl_dir, exist_ok=True)
 
-    for idx, traj_path in enumerate(traj_filepaths):
-        traj_basename = os.path.splitext(os.path.basename(traj_path))[0]
-        
-        current_image_dir = None
-        current_video_path = None
-        if args.save_image_dir:
-            current_image_dir = os.path.join(args.save_image_dir, f"{traj_basename}")
+    for traj_path in trajs:
+        base = os.path.splitext(os.path.basename(traj_path))[0]
+
+        img_dir = os.path.join(args.save_image_dir, base) if args.save_image_dir else None
+        vid_path = None
         if args.save_video_path:
-            video_ext = os.path.splitext(args.save_video_path)[1]
-            current_video_path = os.path.join(
-                os.path.dirname(args.save_video_path),
-                f"{traj_basename}{video_ext}"
-            )
-        
+            ext = os.path.splitext(args.save_video_path)[1]
+            vid_path = os.path.join(os.path.dirname(args.save_video_path), f"{base}{ext}")
+
         obs_saver = EnhancedObsSaver(
-            image_dir=current_image_dir, 
-            video_path=current_video_path, 
+            image_dir=img_dir,
+            video_path=vid_path,
             save_quality=args.save_quality,
-            image_size=args.image_size
+            image_size=args.image_size,
+            clip_model=clip_model,
+            clip_img_transform=clip_img_transform,
+            clip_device=clip_device,
+            save_clip_feats=args.use_clip,
         )
-        
-        obs_saver = replay_single_trajectory(env, scenario, traj_path, args, obs_saver, motion_data)
+
+        obs_saver = replay_single_trajectory(
+            env, scenario, traj_path, args, obs_saver, motion_data
+        )
 
         if args.save_enhanced_pkl_dir and motion_data is not None:
-            output_pkl_path = os.path.join(args.save_enhanced_pkl_dir, f"{traj_basename}_enhanced.pkl")
+            out_pkl = os.path.join(
+                args.save_enhanced_pkl_dir, f"{base}_enhanced.pkl"
+            )
             save_enhanced_pkl(
-                output_pkl_path, 
-                motion_data, 
+                out_pkl,
+                motion_data,
                 obs_saver.resized_images,
                 args.robot_urdf if args.robot_urdf else "",
-                device="cpu"
+                device="cpu",
+                clip_image_embeds=obs_saver.clip_feats,  # 👈 这里传进去，但在函数里会覆盖 rgb_images
             )
 
     env.close()
