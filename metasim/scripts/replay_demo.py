@@ -85,6 +85,7 @@ class Args:
     ] | None = None
 
     num_envs: int = 1
+    env_spacing: float = 5.0  # 环境之间的距离（米）
     try_add_table: bool = True
     object_states: bool = False
     split: Literal["train", "val", "test", "all"] = "all"
@@ -101,12 +102,13 @@ class Args:
 
     robot_height_offset: float = 0.0
 
-    first_person_view: bool = False
+    first_person_view: bool = True
     head_link_name: str = "head_link"
     camera_offset: tuple[float, float, float] = (0.1, 0.0, 0.5)
     camera_direction: tuple[float, float, float] = (1.0, 0.0, -0.577)
 
     motion_config: str | None = None
+    motion_configs: list[str] | None = None  # 多个motion配置文件（每个环境一个）
     save_enhanced_pkl_dir: str | None = None
     robot_urdf: str | None = None
     image_size: int = 224  # 你之前存 pkl 用的 224×224
@@ -746,6 +748,7 @@ def main():
         sim=args.sim,
         renderer=args.renderer,
         num_envs=args.num_envs,
+        env_spacing=args.env_spacing,  # 添加环境间距配置
         try_add_table=args.try_add_table,
         object_states=args.object_states,
         split=args.split,
@@ -805,9 +808,28 @@ def main():
             log.error(f"[CLIP] load failed: {e}")
             args.use_clip = False
 
-    motion_data = None
-    if args.motion_config:
+    # 加载 motion 数据（支持多个）
+    motion_data_list = []
+    if args.motion_configs:
+        # 多个 motion configs（每个环境一个）
+        log.info(f"Loading {len(args.motion_configs)} motion configs for {args.num_envs} envs")
+        for i, cfg_path in enumerate(args.motion_configs):
+            motion_data = load_motion_data(cfg_path)
+            motion_data_list.append(motion_data)
+            log.info(f"  Env {i}: {cfg_path}")
+        
+        # 如果 motion_configs 数量少于 num_envs，循环使用
+        if len(motion_data_list) < args.num_envs:
+            log.warning(f"Only {len(motion_data_list)} motions for {args.num_envs} envs, will cycle")
+            while len(motion_data_list) < args.num_envs:
+                motion_data_list.append(motion_data_list[len(motion_data_list) % len(args.motion_configs)])
+    elif args.motion_config:
+        # 单个 motion config（所有环境共享）
         motion_data = load_motion_data(args.motion_config)
+        motion_data_list = [motion_data] * args.num_envs
+        log.info(f"Using single motion config for all {args.num_envs} envs")
+    else:
+        motion_data_list = None
 
     trajs = scenario.task.traj_filepath
     if not isinstance(trajs, list):
@@ -837,7 +859,7 @@ def main():
         )
 
         obs_saver = replay_single_trajectory(
-            env, scenario, traj_path, args, obs_saver, motion_data
+            env, scenario, traj_path, args, obs_saver, motion_data_list
         )
 
         if args.save_enhanced_pkl_dir and motion_data is not None:

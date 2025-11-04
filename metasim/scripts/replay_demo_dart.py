@@ -86,7 +86,7 @@ class Args:
 
     save_image_dir: str | None = "tmp"
     save_video_path: str | None = None
-    stop_on_runout: bool = False
+    stop_on_runout: bool = True
     
     camera_width: int = 1920
     camera_height: int = 1080
@@ -95,7 +95,7 @@ class Args:
     
     robot_height_offset: float = 0.0
     
-    first_person_view: bool = True
+    first_person_view: bool = False
     head_link_name: str = "head_link"
     camera_offset: tuple[float, float, float] = (0.1, 0.0, 0.5)
     camera_direction: tuple[float, float, float] = (1.0, 0.0, -0.577)
@@ -149,6 +149,15 @@ class DARTMotionGenerator:
         self.args = args
         self.device = device
         self.segment_count = 0
+        
+        # ✅ 新增：收集所有生成的运动数据
+        self.collected_motion_data = {
+            'root_pos': [],
+            'root_rot': [],
+            'dof_pos': [],
+            'local_body_pos': [],
+        }
+        self.prefix_data = None  # 保存prefix数据
         
         log.info("Loading DART models...")
         proj_root = project_root
@@ -239,6 +248,9 @@ class DARTMotionGenerator:
                          Should have shape [T, D] where T >= self.history_length
         """
         log.info(f"Initializing DART with prefix data (need {self.history_length} frames)")
+        
+        # ✅ 保存prefix数据，用于最终保存
+        self.prefix_data = prefix_data
         
         # Convert prefix data to DART format
         dart_format = self._convert_to_dart_format(prefix_data)
@@ -529,6 +541,16 @@ class DARTMotionGenerator:
             log.debug(f"Segment end global yaw: {global_yaws[-1]:.3f} rad ({np.degrees(global_yaws[-1]):.1f} deg)")
             log.debug(f"Last frame z height: {root_pos_global[-1, 2].item()}")
         
+        # ✅ 收集生成的运动数据
+        for t in range(T):
+            self.collected_motion_data['root_pos'].append(root_pos_global[t].cpu().numpy())
+            self.collected_motion_data['root_rot'].append(root_rot_quat_wxyz[t].cpu().numpy())
+            self.collected_motion_data['dof_pos'].append(dof_pos[t])
+            # local_body_pos如果存在的话也收集
+            if 'local_body_pos' in dart_dict:
+                local_body_pos = dart_dict['local_body_pos'][0].cpu().numpy()
+                self.collected_motion_data['local_body_pos'].append(local_body_pos[t])
+        
         log.info(f"Converted DART motion to {len(states_sequence)} states")
         
         # Return in format expected by get_states: [[states]]
@@ -564,6 +586,76 @@ class DARTMotionGenerator:
         
         # Return in format expected by get_actions: [[actions]]
         return [actions]
+    
+    def export_complete_motion_pkl(self, robot_cfg: BaseRobotCfg) -> dict:
+        """✅ 导出完整的运动数据（prefix + 生成的部分）
+        
+        Returns:
+            dict with keys: ['fps', 'root_pos', 'root_rot', 'dof_pos', 'local_body_pos', 'link_body_list']
+        """
+        log.info("Exporting complete motion data (prefix + generated)...")
+        
+        # 初始化输出字典
+        output_dict = {
+            'fps': 20,  # 默认20fps
+            'link_body_list': list(robot_cfg.actuators.keys()) if robot_cfg else []
+        }
+        
+        # 合并prefix数据和生成的数据
+        if self.prefix_data is not None:
+            prefix_length = len(self.prefix_data.get('dof_pos', []))
+            log.info(f"Prefix frames: {prefix_length}")
+        else:
+            prefix_length = 0
+            log.warning("No prefix data found")
+        
+        generated_length = len(self.collected_motion_data['dof_pos'])
+        log.info(f"Generated frames: {generated_length}")
+        
+        # 组合数据
+        if self.prefix_data is not None and prefix_length > 0:
+            # 合并prefix和生成的数据
+            output_dict['root_pos'] = np.concatenate([
+                self.prefix_data['root_pos'],
+                np.array(self.collected_motion_data['root_pos'])
+            ], axis=0)
+            
+            output_dict['root_rot'] = np.concatenate([
+                self.prefix_data['root_rot'],
+                np.array(self.collected_motion_data['root_rot'])
+            ], axis=0)
+            
+            output_dict['dof_pos'] = np.concatenate([
+                self.prefix_data['dof_pos'],
+                np.array(self.collected_motion_data['dof_pos'])
+            ], axis=0)
+            
+            # local_body_pos可能不存在
+            if 'local_body_pos' in self.prefix_data and len(self.collected_motion_data['local_body_pos']) > 0:
+                output_dict['local_body_pos'] = np.concatenate([
+                    self.prefix_data['local_body_pos'],
+                    np.array(self.collected_motion_data['local_body_pos'])
+                ], axis=0)
+            elif 'local_body_pos' in self.prefix_data:
+                output_dict['local_body_pos'] = self.prefix_data['local_body_pos']
+        else:
+            # 仅使用生成的数据
+            output_dict['root_pos'] = np.array(self.collected_motion_data['root_pos'])
+            output_dict['root_rot'] = np.array(self.collected_motion_data['root_rot'])
+            output_dict['dof_pos'] = np.array(self.collected_motion_data['dof_pos'])
+            if len(self.collected_motion_data['local_body_pos']) > 0:
+                output_dict['local_body_pos'] = np.array(self.collected_motion_data['local_body_pos'])
+        
+        total_frames = len(output_dict['dof_pos'])
+        log.success(f"✅ Exported complete motion: {total_frames} frames total")
+        log.success(f"   Keys: {list(output_dict.keys())}")
+        log.success(f"   root_pos shape: {output_dict['root_pos'].shape}")
+        log.success(f"   root_rot shape: {output_dict['root_rot'].shape}")
+        log.success(f"   dof_pos shape: {output_dict['dof_pos'].shape}")
+        if 'local_body_pos' in output_dict:
+            log.success(f"   local_body_pos shape: {output_dict['local_body_pos'].shape}")
+        
+        return output_dict
 
 
 def get_actions(all_actions, action_idx: int, num_envs: int, robot: BaseRobotCfg):
@@ -1299,6 +1391,19 @@ def main():
         obs_saver = replay_single_trajectory_with_dart(
             env, scenario, traj_path, args, obs_saver, motion_data, dart_generator
         )
+
+        # ✅ 保存完整的运动pkl（prefix + 生成的部分）
+        if dart_generator is not None and args.save_enhanced_pkl_dir:
+            complete_motion_dict = dart_generator.export_complete_motion_pkl(scenario.robots[0])
+            complete_pkl_path = os.path.join(args.save_enhanced_pkl_dir, f"{traj_basename}_complete_motion.pkl")
+            os.makedirs(os.path.dirname(complete_pkl_path), exist_ok=True)
+            
+            log.info(f"Saving complete motion pkl to {complete_pkl_path}")
+            with open(complete_pkl_path, 'wb') as f:
+                pickle.dump(complete_motion_dict, f)
+            log.success(f"✅ Complete motion pkl saved successfully!")
+            log.success(f"   Total frames: {len(complete_motion_dict['dof_pos'])}")
+            log.success(f"   Dict keys: {list(complete_motion_dict.keys())}")
 
         # Save enhanced pkl if requested
         if args.save_enhanced_pkl_dir and motion_data is not None:
