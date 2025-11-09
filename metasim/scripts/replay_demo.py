@@ -90,7 +90,7 @@ class Args:
     split: Literal["train", "val", "test", "all"] = "all"
     headless: bool = False
 
-    save_image_dir: str | None = "tmp"
+    save_image_dir: str | None = None
     save_video_path: str | None = None
     stop_on_runout: bool = True
 
@@ -124,7 +124,7 @@ class Args:
     save_trajectory_plot: str | None = None
 
     # CLIP
-    use_clip: bool = False
+    use_clip: bool = True
     clip_device: str = "cuda"
     clip_model_name: str = "ViT-B/32"
 
@@ -443,7 +443,9 @@ class EnhancedObsSaver:
             Image.LANCZOS,
         )
         resized_np = np.asarray(resized_pil, dtype=np.uint8)
+        print(f"resized_np.shape = {resized_np.shape}")
         self.resized_images.append(resized_np)
+        # 在 add 方法里加这两行
 
         # 3) CLIP 一帧一帧 encode
         if self.save_clip_feats:
@@ -455,6 +457,8 @@ class EnhancedObsSaver:
                     feat = self.clip_model.encode_image(clip_tensor).float()
                     feat = feat / feat.norm(dim=-1, keepdim=True).clamp_min(1e-6)
                 self.clip_feats.append(feat.cpu().numpy()[0])
+                print(f"img_np shape: {img_np.shape}")  # 看拼接图有多大
+                print(f"CLIP feat shape: {feat.shape}")  # 看 CLIP 输出维度
             except Exception as e:
                 log.error(f"[CLIP] frame {self.image_idx-1} encode failed: {e}")
                 # 保持长度一致
@@ -630,6 +634,7 @@ def save_enhanced_pkl(
                     f"image count {len(resized_images)} != motion frames {T_len}, trim"
                 )
             out["rgb_images"] = resized_images[:T_len]
+            print(f"Actual rgb_images shape: {resized_images[0].shape if resized_images else 'empty'}")  # 👈 加这行
             log.info(
                 f"rgb_images saved as 224x224 images, shape={(len(resized_images[:T_len]),)}"
             )
